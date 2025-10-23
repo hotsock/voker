@@ -1,0 +1,10 @@
+version = 0.1
+
+[default.deploy.parameters]
+stack_name = "voker-error-example"
+resolve_s3 = true
+s3_prefix = "voker"
+region = "us-east-1"
+capabilities = "CAPABILITY_IAM"
+image_repositories = []
+template = "template.yml"

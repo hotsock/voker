@@ -1,0 +1,21 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: Voker Basic Example
+Globals:
+  Function:
+    Architectures: [arm64]
+    Handler: bootstrap
+    LoggingConfig:
+      ApplicationLogLevel: INFO
+      LogFormat: JSON
+      SystemLogLevel: INFO
+    MemorySize: 512
+    Runtime: provided.al2023
+    Timeout: 1
+Parameters: {}
+Resources:
+  ExampleFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ./bin
+      Description: Basic Example
