@@ -4,7 +4,7 @@ A minimal, modern AWS Lambda runtime for Go that focuses on performance, simplic
 
 ## Overview
 
-Voker is a simplified alternative to [`aws-lambda-go`](https://github.com/aws/aws-lambda-go) that maintains full compatibility with the AWS Lambda Runtime API. It uses Go generics to provide compile-time type safety with a clean, single-function-signature design.
+Voker is a simplified alternative to [`aws-lambda-go`](https://github.com/aws/aws-lambda-go) that maintains full compatibility with the AWS Lambda Runtime API. It uses Go generics to provide compile-time type safety with a clean, single-function-signature design. It supports structured logging with `slog` and proper log levels for errors.
 
 ## Installation
 
@@ -53,7 +53,6 @@ func handler(ctx context.Context, event MyEvent) (MyResponse, error) {
         log.Printf("Function ARN: %s", lc.InvokedFunctionArn)
     }
 
-    // Access deadline
     deadline, _ := ctx.Deadline()
     log.Printf("Function deadline: %s", deadline)
 
@@ -148,10 +147,72 @@ func handler(ctx context.Context, event MyEvent) (MyResponse, error) {
 
 ```go
 func handler(ctx context.Context, event MyEvent) (MyResponse, error) {
-    panic("unexpected error")
+	a := []string{"hey"}
+	fmt.Println(a[1]) // panic
+
+    // ...
 }
-// Returns: {"errorMessage":"unexpected error","errorType":"string","stackTrace":[...]}
-// Note: Process exits after panic
+```
+
+Returns the following (and process exits after panic):
+
+```json
+{
+  "errorType": "Runtime.Panic.boundsError",
+  "errorMessage": "runtime error: index out of range [1] with length 1",
+  "stackTrace": [
+    {
+      "label": "gopanic",
+      "line": 783,
+      "path": "/usr/local/go/src/runtime/panic.go"
+    },
+    {
+      "label": "goPanicIndex",
+      "line": 115,
+      "path": "/usr/local/go/src/runtime/panic.go"
+    },
+    {
+      "label": "handler",
+      "line": 23,
+      "path": "/Users/me/Code/voker/examples/error/main.go"
+    },
+    {
+      "label": "handlerWithLambdaLogging[...].func1",
+      "line": 48,
+      "path": "/Users/me/Code/voker/examples/error/main.go"
+    },
+    {
+      "label": "callHandler[...]",
+      "line": 198,
+      "path": "Code/voker/voker.go"
+    },
+    {
+      "label": "handleInvocation[...]",
+      "line": 170,
+      "path": "Code/voker/voker.go"
+    },
+    {
+      "label": "Start[...]",
+      "line": 120,
+      "path": "Code/voker/voker.go"
+    },
+    {
+      "label": "main",
+      "line": 13,
+      "path": "/Users/me/Code/voker/examples/error/main.go"
+    },
+    {
+      "label": "main",
+      "line": 285,
+      "path": "/usr/local/go/src/runtime/proc.go"
+    },
+    {
+      "label": "goexit",
+      "line": 1268,
+      "path": "/usr/local/go/src/runtime/asm_arm64.s"
+    }
+  ]
+}
 ```
 
 ## Testing Your Handler
@@ -173,7 +234,7 @@ No mocking required - your handler is just a function!
 ### Build for Lambda
 
 ```bash
-GOOS=linux GOARCH=arm64 go build -tags lambda.norpc -o bootstrap main.go
+GOOS=linux GOARCH=arm64 go build -o bootstrap main.go
 zip function.zip bootstrap
 ```
 
@@ -216,7 +277,7 @@ func handler(ctx context.Context, event MyEvent) (MyResponse, error) {
 }
 
 func main() {
-    lambda.Start(handler)
+    lambda.StartHandlerFunc(handler)
 }
 ```
 
@@ -235,6 +296,8 @@ func main() {
 ```
 
 That's it! If you were using the standard `func(context.Context, TIn) (TOut, error)` signature, it's a drop-in replacement.
+
+If you were using `lambdacontext.LambdaContext` (most likely `lambdacontext.FromContext(ctx)` in your code, switch those to `voker.FromContext(ctx)`).
 
 ## License
 

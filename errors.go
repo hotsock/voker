@@ -10,8 +10,8 @@ import (
 
 // ErrorResponse represents a Lambda function error response
 type ErrorResponse struct {
-	Type       string       `json:"type"`
-	Message    string       `json:"message"`
+	Type       string       `json:"errorType"`
+	Message    string       `json:"errorMessage"`
 	StackTrace []StackFrame `json:"stackTrace,omitempty"`
 }
 
@@ -23,8 +23,8 @@ func (e *ErrorResponse) Error() string {
 // LogValue implements the slog.LogValuer interface for structured logging
 func (e *ErrorResponse) LogValue() slog.Value {
 	attrs := []slog.Attr{
-		slog.String("type", e.Type),
-		slog.String("message", e.Message),
+		slog.String("errorType", e.Type),
+		slog.String("errorMessage", e.Message),
 	}
 
 	if len(e.StackTrace) > 0 {

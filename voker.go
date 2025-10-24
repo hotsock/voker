@@ -223,7 +223,7 @@ func sendError(ctx context.Context, inv *invocation, err error, logger *slog.Log
 	errorJSON, marshalErr := json.Marshal(errResp)
 	if marshalErr != nil {
 		// If we can't marshal the error, create a simple error
-		errorJSON = fmt.Appendf(nil, `{"Message":"failed to marshal error: %s","Type":"Runtime.MarshalError"}`, marshalErr.Error())
+		errorJSON = fmt.Appendf(nil, `{"message":"failed to marshal error: %s","type":"Runtime.MarshalError"}`, marshalErr.Error())
 	}
 
 	logger.ErrorContext(
