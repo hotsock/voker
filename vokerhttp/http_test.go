@@ -1,4 +1,4 @@
-package voker
+package vokerhttp
 
 import (
 	"testing"

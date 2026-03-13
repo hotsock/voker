@@ -1,16 +1,14 @@
-package voker
+package vokerhttp
 
 import (
 	"context"
 	"encoding/base64"
-	"encoding/json"
 	"io"
-	"log/slog"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"testing"
 
+	"github.com/hotsock/voker"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -115,16 +113,16 @@ func TestALBRequest_ContextPropagation(t *testing.T) {
 	adapter := &ALB{}
 	event := newTestALBRequest()
 
-	lc := &LambdaContext{
+	lc := &voker.LambdaContext{
 		AwsRequestID:       "req-789",
 		InvokedFunctionArn: "arn:aws:lambda:us-east-1:123:function:test",
 	}
-	ctx := NewContext(context.Background(), lc)
+	ctx := voker.NewContext(context.Background(), lc)
 
 	req, err := adapter.Request(ctx, event)
 	require.NoError(t, err)
 
-	gotLC, ok := FromContext(req.Context())
+	gotLC, ok := voker.FromContext(req.Context())
 	require.True(t, ok)
 	assert.Equal(t, "req-789", gotLC.AwsRequestID)
 }
@@ -196,71 +194,4 @@ func TestALBResponse_SetCookieInHeaders(t *testing.T) {
 
 	// ALB uses headers map for cookies (no top-level cookies field)
 	assert.Equal(t, "session=abc; HttpOnly", resp.Headers["set-cookie"])
-}
-
-func TestALB_Integration(t *testing.T) {
-	var capturedResponse ALBResponse
-
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Path {
-		case "/2018-06-01/runtime/invocation/next":
-			w.Header().Set(headerRequestID, "alb-req-1")
-			w.Header().Set(headerDeadlineMS, "999999999999999")
-			w.WriteHeader(http.StatusOK)
-
-			event := ALBRequest{
-				HTTPMethod: "POST",
-				Path:       "/api/data",
-				Headers: map[string]string{
-					"host":              "my-alb.us-east-1.elb.amazonaws.com",
-					"content-type":      "application/json",
-					"x-forwarded-for":   "10.0.0.1",
-					"x-forwarded-proto": "https",
-				},
-				Body: `{"input":"test"}`,
-			}
-			json.NewEncoder(w).Encode(event)
-
-		case "/2018-06-01/runtime/invocation/alb-req-1/response":
-			err := json.NewDecoder(r.Body).Decode(&capturedResponse)
-			require.NoError(t, err)
-			w.WriteHeader(http.StatusAccepted)
-		}
-	}))
-	defer server.Close()
-
-	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
-	client := newRuntimeClient(server.URL[7:], logger)
-
-	adapter := &ALB{}
-	httpHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		assert.Equal(t, "POST", r.Method)
-		assert.Equal(t, "/api/data", r.URL.Path)
-		assert.Equal(t, "10.0.0.1", r.RemoteAddr)
-
-		body, _ := io.ReadAll(r.Body)
-		assert.Equal(t, `{"input":"test"}`, string(body))
-
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusCreated)
-		w.Write([]byte(`{"result":"ok"}`))
-	})
-
-	handler := func(ctx context.Context, event ALBRequest) (ALBResponse, error) {
-		req, err := adapter.Request(ctx, event)
-		if err != nil {
-			return ALBResponse{StatusCode: 500}, err
-		}
-		recorder := httptest.NewRecorder()
-		httpHandler.ServeHTTP(recorder, req)
-		return adapter.Response(recorder), nil
-	}
-
-	err := handleInvocation(client, handler, &options{logger: logger})
-	require.NoError(t, err)
-
-	assert.Equal(t, 201, capturedResponse.StatusCode)
-	assert.Equal(t, "201 Created", capturedResponse.StatusDescription)
-	assert.Equal(t, `{"result":"ok"}`, capturedResponse.Body)
-	assert.False(t, capturedResponse.IsBase64Encoded)
 }

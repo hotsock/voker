@@ -1,4 +1,14 @@
-package voker
+// Package vokerhttp provides adapters that convert Lambda events into
+// standard net/http requests. It wraps [voker.Start] so users can pass
+// an http.Handler instead of a typed Lambda handler.
+//
+// Usage:
+//
+//	vokerhttp.StartHTTP(mux, &vokerhttp.FunctionURL{})
+//	vokerhttp.StartHTTP(mux, &vokerhttp.APIGatewayV2{})
+//	vokerhttp.StartHTTP(mux, &vokerhttp.APIGatewayV1{})
+//	vokerhttp.StartHTTP(mux, &vokerhttp.ALB{})
+package vokerhttp
 
 import (
 	"context"
@@ -6,6 +16,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+
+	"github.com/hotsock/voker"
 )
 
 type eventContextKey struct{}
@@ -13,7 +25,7 @@ type eventContextKey struct{}
 // Adapter converts between a Lambda event type and net/http.
 // Implement this interface for each Lambda event source.
 //
-// Voker provides four built-in adapters:
+// Vokerhttp provides four built-in adapters:
 //   - [FunctionURL] for Lambda Function URLs
 //   - [APIGatewayV2] for API Gateway v2 HTTP APIs
 //   - [APIGatewayV1] for API Gateway v1 REST APIs
@@ -33,21 +45,15 @@ type Adapter[E, R any] interface {
 // retrieved using [EventFromContext]:
 //
 //	func handler(w http.ResponseWriter, r *http.Request) {
-//	    event, ok := voker.EventFromContext[voker.FunctionURLRequest](r.Context())
+//	    event, ok := vokerhttp.EventFromContext[vokerhttp.FunctionURLRequest](r.Context())
 //	}
 //
 // Usage:
 //
-//	voker.StartHTTP(mux, &voker.FunctionURL{})
-//	voker.StartHTTP(mux, &voker.APIGatewayV2{})
-//	voker.StartHTTP(mux, &voker.APIGatewayV1{})
-//	voker.StartHTTP(mux, &voker.ALB{})
-//
-// Options can be provided to configure runtime behavior:
-//
-//	voker.StartHTTP(mux, &voker.FunctionURL{}, voker.WithTraceID(true))
-func StartHTTP[E, R any](handler http.Handler, adapter Adapter[E, R], opts ...Option) {
-	Start(func(ctx context.Context, event E) (R, error) {
+//	vokerhttp.StartHTTP(mux, &vokerhttp.FunctionURL{})
+//	vokerhttp.StartHTTP(mux, &vokerhttp.APIGatewayV2{}, voker.WithLogger(logger))
+func StartHTTP[E, R any](handler http.Handler, adapter Adapter[E, R], opts ...voker.Option) {
+	voker.Start(func(ctx context.Context, event E) (R, error) {
 		req, err := adapter.Request(ctx, event)
 		if err != nil {
 			var zero R
@@ -66,10 +72,10 @@ func StartHTTP[E, R any](handler http.Handler, adapter Adapter[E, R], opts ...Op
 // EventFromContext retrieves the original Lambda event from the request context.
 // The type parameter must match the event type for the adapter in use:
 //
-//	event, ok := voker.EventFromContext[voker.FunctionURLRequest](r.Context())
-//	event, ok := voker.EventFromContext[voker.APIGatewayV2Request](r.Context())
-//	event, ok := voker.EventFromContext[voker.APIGatewayV1Request](r.Context())
-//	event, ok := voker.EventFromContext[voker.ALBRequest](r.Context())
+//	event, ok := vokerhttp.EventFromContext[vokerhttp.FunctionURLRequest](r.Context())
+//	event, ok := vokerhttp.EventFromContext[vokerhttp.APIGatewayV2Request](r.Context())
+//	event, ok := vokerhttp.EventFromContext[vokerhttp.APIGatewayV1Request](r.Context())
+//	event, ok := vokerhttp.EventFromContext[vokerhttp.ALBRequest](r.Context())
 func EventFromContext[E any](ctx context.Context) (E, bool) {
 	event, ok := ctx.Value(eventContextKey{}).(E)
 	return event, ok

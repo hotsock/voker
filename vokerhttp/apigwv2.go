@@ -1,4 +1,4 @@
-package voker
+package vokerhttp
 
 import (
 	"context"
@@ -9,7 +9,7 @@ import (
 // APIGatewayV2 implements [Adapter] for API Gateway v2 HTTP API events
 // (payload format 2.0).
 //
-//	voker.StartHTTP(mux, &voker.APIGatewayV2{})
+//	vokerhttp.StartHTTP(mux, &vokerhttp.APIGatewayV2{})
 type APIGatewayV2 struct{}
 
 // APIGatewayV2Request is the API Gateway v2 HTTP API event (payload format 2.0).

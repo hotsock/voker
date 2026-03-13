@@ -1,4 +1,4 @@
-package voker
+package vokerhttp
 
 import (
 	"bytes"
@@ -13,7 +13,7 @@ import (
 // FunctionURL implements [Adapter] for Lambda Function URL events
 // (payload format 2.0).
 //
-//	voker.StartHTTP(mux, &voker.FunctionURL{})
+//	vokerhttp.StartHTTP(mux, &vokerhttp.FunctionURL{})
 type FunctionURL struct{}
 
 // Request converts a Function URL event into an *http.Request.
@@ -51,18 +51,18 @@ type payloadV2Request struct {
 
 // PayloadV2RequestContext contains the request context for payload format 2.0 events.
 type PayloadV2RequestContext struct {
-	AccountID      string                        `json:"accountId"`
-	APIID          string                        `json:"apiId"`
-	Authentication PayloadV2Authentication       `json:"authentication"`
-	Authorizer     PayloadV2Authorizer           `json:"authorizer"`
-	DomainName     string                        `json:"domainName"`
-	DomainPrefix   string                        `json:"domainPrefix"`
-	HTTP           PayloadV2RequestContextHTTP   `json:"http"`
-	RequestID      string                        `json:"requestId"`
-	RouteKey       string                        `json:"routeKey"`
-	Stage          string                        `json:"stage"`
-	Time           string                        `json:"time"`
-	TimeEpoch      int64                         `json:"timeEpoch"`
+	AccountID      string                      `json:"accountId"`
+	APIID          string                      `json:"apiId"`
+	Authentication PayloadV2Authentication     `json:"authentication"`
+	Authorizer     PayloadV2Authorizer         `json:"authorizer"`
+	DomainName     string                      `json:"domainName"`
+	DomainPrefix   string                      `json:"domainPrefix"`
+	HTTP           PayloadV2RequestContextHTTP `json:"http"`
+	RequestID      string                      `json:"requestId"`
+	RouteKey       string                      `json:"routeKey"`
+	Stage          string                      `json:"stage"`
+	Time           string                      `json:"time"`
+	TimeEpoch      int64                       `json:"timeEpoch"`
 }
 
 // PayloadV2RequestContextHTTP contains HTTP-specific fields from the request context.
@@ -76,8 +76,8 @@ type PayloadV2RequestContextHTTP struct {
 
 // PayloadV2Authorizer contains authorizer information for payload format 2.0.
 type PayloadV2Authorizer struct {
-	JWT PayloadV2AuthorizerJWT        `json:"jwt"`
-	IAM PayloadV2AuthorizerIAM        `json:"iam"`
+	JWT PayloadV2AuthorizerJWT `json:"jwt"`
+	IAM PayloadV2AuthorizerIAM `json:"iam"`
 }
 
 // PayloadV2AuthorizerJWT contains JWT authorizer claims and scopes.
@@ -88,10 +88,9 @@ type PayloadV2AuthorizerJWT struct {
 
 // PayloadV2AuthorizerIAM contains IAM authorizer information.
 type PayloadV2AuthorizerIAM struct {
-	AccessKey string `json:"accessKey"`
-	AccountID string `json:"accountId"`
-	CallerID  string `json:"callerId"`
-	// CognitoIdentity contains the Cognito identity information if present.
+	AccessKey       string                   `json:"accessKey"`
+	AccountID       string                   `json:"accountId"`
+	CallerID        string                   `json:"callerId"`
 	CognitoIdentity PayloadV2CognitoIdentity `json:"cognitoIdentity"`
 	PrincipalOrgID  string                   `json:"principalOrgId"`
 	UserARN         string                   `json:"userArn"`
@@ -112,10 +111,10 @@ type PayloadV2Authentication struct {
 
 // PayloadV2ClientCert contains TLS client certificate details.
 type PayloadV2ClientCert struct {
-	ClientCertPEM string                    `json:"clientCertPem"`
-	SubjectDN     string                    `json:"subjectDN"`
-	IssuerDN      string                    `json:"issuerDN"`
-	SerialNumber  string                    `json:"serialNumber"`
+	ClientCertPEM string                      `json:"clientCertPem"`
+	SubjectDN     string                      `json:"subjectDN"`
+	IssuerDN      string                      `json:"issuerDN"`
+	SerialNumber  string                      `json:"serialNumber"`
 	Validity      PayloadV2ClientCertValidity `json:"validity"`
 }
 

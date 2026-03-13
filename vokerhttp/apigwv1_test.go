@@ -1,16 +1,14 @@
-package voker
+package vokerhttp
 
 import (
 	"context"
 	"encoding/base64"
-	"encoding/json"
 	"io"
-	"log/slog"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"testing"
 
+	"github.com/hotsock/voker"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -156,16 +154,16 @@ func TestAPIGatewayV1Request_ContextPropagation(t *testing.T) {
 	adapter := &APIGatewayV1{}
 	event := newTestAPIGatewayV1Request()
 
-	lc := &LambdaContext{
+	lc := &voker.LambdaContext{
 		AwsRequestID:       "req-456",
 		InvokedFunctionArn: "arn:aws:lambda:us-east-1:123:function:test",
 	}
-	ctx := NewContext(context.Background(), lc)
+	ctx := voker.NewContext(context.Background(), lc)
 
 	req, err := adapter.Request(ctx, event)
 	require.NoError(t, err)
 
-	gotLC, ok := FromContext(req.Context())
+	gotLC, ok := voker.FromContext(req.Context())
 	require.True(t, ok)
 	assert.Equal(t, "req-456", gotLC.AwsRequestID)
 }
@@ -219,92 +217,4 @@ func TestAPIGatewayV1Response_MultiValueHeaders(t *testing.T) {
 	assert.Equal(t, []string{"val1", "val2"}, resp.MultiValueHeaders["x-custom"])
 	// Single-value Headers should be nil (we use MultiValueHeaders exclusively)
 	assert.Nil(t, resp.Headers)
-}
-
-func TestAPIGatewayV1_Integration(t *testing.T) {
-	var capturedResponse APIGatewayV1Response
-
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Path {
-		case "/2018-06-01/runtime/invocation/next":
-			w.Header().Set(headerRequestID, "apigw-req-1")
-			w.Header().Set(headerDeadlineMS, "999999999999999")
-			w.Header().Set(headerFunctionARN, "arn:aws:lambda:us-east-1:123:function:test")
-			w.WriteHeader(http.StatusOK)
-
-			event := APIGatewayV1Request{
-				Resource:   "/api/{proxy+}",
-				Path:       "/api/users",
-				HTTPMethod: "GET",
-				Headers: map[string]string{
-					"Host":         "abc123.execute-api.us-east-1.amazonaws.com",
-					"Content-Type": "application/json",
-				},
-				MultiValueHeaders: map[string][]string{
-					"Host":         {"abc123.execute-api.us-east-1.amazonaws.com"},
-					"Content-Type": {"application/json"},
-				},
-				QueryStringParameters: map[string]string{"limit": "10"},
-				MultiValueQueryStringParameters: map[string][]string{
-					"limit": {"10"},
-				},
-				RequestContext: APIGatewayV1RequestContext{
-					AccountID:  "123456789012",
-					APIID:      "abc123",
-					DomainName: "abc123.execute-api.us-east-1.amazonaws.com",
-					HTTPMethod: "GET",
-					Identity: APIGatewayV1RequestIdentity{
-						SourceIP:  "10.0.0.1",
-						UserAgent: "TestAgent/1.0",
-					},
-					RequestID: "apigw-req-1",
-					Stage:     "prod",
-				},
-			}
-			json.NewEncoder(w).Encode(event)
-
-		case "/2018-06-01/runtime/invocation/apigw-req-1/response":
-			err := json.NewDecoder(r.Body).Decode(&capturedResponse)
-			require.NoError(t, err)
-			w.WriteHeader(http.StatusAccepted)
-		}
-	}))
-	defer server.Close()
-
-	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
-	client := newRuntimeClient(server.URL[7:], logger)
-
-	adapter := &APIGatewayV1{}
-	httpHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		assert.Equal(t, "GET", r.Method)
-		assert.Equal(t, "/api/users", r.URL.Path)
-		assert.Equal(t, "10", r.URL.Query().Get("limit"))
-		assert.Equal(t, "10.0.0.1", r.RemoteAddr)
-
-		lc, ok := FromContext(r.Context())
-		assert.True(t, ok)
-		assert.Equal(t, "apigw-req-1", lc.AwsRequestID)
-
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(`{"users":[]}`))
-	})
-
-	handler := func(ctx context.Context, event APIGatewayV1Request) (APIGatewayV1Response, error) {
-		req, err := adapter.Request(ctx, event)
-		if err != nil {
-			return APIGatewayV1Response{StatusCode: 500}, err
-		}
-		recorder := httptest.NewRecorder()
-		httpHandler.ServeHTTP(recorder, req)
-		return adapter.Response(recorder), nil
-	}
-
-	err := handleInvocation(client, handler, &options{logger: logger})
-	require.NoError(t, err)
-
-	assert.Equal(t, 200, capturedResponse.StatusCode)
-	assert.Equal(t, `{"users":[]}`, capturedResponse.Body)
-	assert.False(t, capturedResponse.IsBase64Encoded)
-	assert.Equal(t, []string{"application/json"}, capturedResponse.MultiValueHeaders["content-type"])
 }

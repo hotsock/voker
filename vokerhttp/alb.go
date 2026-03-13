@@ -1,4 +1,4 @@
-package voker
+package vokerhttp
 
 import (
 	"bytes"
@@ -14,7 +14,7 @@ import (
 // ALB implements [Adapter] for Application Load Balancer
 // Lambda target group events.
 //
-//	voker.StartHTTP(mux, &voker.ALB{})
+//	vokerhttp.StartHTTP(mux, &vokerhttp.ALB{})
 type ALB struct{}
 
 // ALBRequest is the ALB Lambda target group event.
