@@ -7,10 +7,14 @@ import (
 	"os"
 
 	"github.com/hotsock/voker"
+	"github.com/hotsock/voker/vokerslog"
 )
 
 func main() {
-	voker.Start(handlerWithLambdaLogging(handler))
+	logger := slog.New(vokerslog.NewHandler(os.Stdout))
+	slog.SetDefault(logger)
+
+	voker.Start(handler, voker.WithLogger(logger))
 }
 
 func handler(ctx context.Context, event any) (any, error) {
@@ -23,28 +27,4 @@ func handler(ctx context.Context, event any) (any, error) {
 	fmt.Println(a[1]) // panic
 
 	return nil, nil
-}
-
-func handlerWithLambdaLogging[E, R any](handler func(context.Context, E) (R, error)) func(context.Context, E) (R, error) {
-	var level slog.Level
-	switch os.Getenv("AWS_LAMBDA_LOG_LEVEL") {
-	case "DEBUG":
-		level = slog.LevelDebug
-	case "INFO":
-		level = slog.LevelInfo
-	case "WARN":
-		level = slog.LevelWarn
-	case "ERROR":
-		level = slog.LevelError
-	default:
-		level = slog.LevelInfo
-	}
-
-	return func(ctx context.Context, event E) (R, error) {
-		lc, _ := voker.FromContext(ctx)
-		logHandler := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: level})).With("requestId", lc.AwsRequestID)
-		slog.SetDefault(logHandler)
-
-		return handler(ctx, event)
-	}
 }

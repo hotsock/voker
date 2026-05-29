@@ -4,7 +4,7 @@ A minimal, modern AWS Lambda runtime for Go that focuses on performance, simplic
 
 ## Overview
 
-Voker is a simplified alternative to [`aws-lambda-go`](https://github.com/aws/aws-lambda-go) that maintains full compatibility with the AWS Lambda Runtime API. It uses Go generics to provide compile-time type safety with a clean, single-function-signature design. It supports structured logging with `slog` and proper log levels for errors.
+Voker is a simplified alternative to [`aws-lambda-go`](https://github.com/aws/aws-lambda-go) that maintains full compatibility with the AWS Lambda Runtime API. It uses Go generics to provide compile-time type safety with a clean, single-function-signature design. It supports structured logging with `slog` and proper log levels for errors, including an optional `vokerslog` handler tuned for AWS Lambda.
 
 ## Installation
 
@@ -115,6 +115,29 @@ Where:
 - `TOut` is your output type (must be JSON-serializable)
 - `error` is required for error handling
 
+### Raw payloads
+
+Declare `TIn` as `json.RawMessage` to receive the invocation payload verbatim.
+Voker skips unmarshaling — and JSON validation — and hands the raw bytes
+straight to your handler, which is then responsible for decoding them:
+
+```go
+func handler(ctx context.Context, payload json.RawMessage) (Response, error) {
+    // payload is the raw request bytes, aliased (not copied) from the
+    // invocation buffer. Decode it yourself however you like.
+    var event MyEvent
+    if err := json.Unmarshal(payload, &event); err != nil {
+        return Response{}, err
+    }
+    // ...
+}
+```
+
+This is useful for handlers that work with large payloads and want to measure
+or control their own decoding rather than paying for an unmarshal up front.
+Because validation is skipped, the handler also sees empty or malformed
+payloads as-is instead of voker rejecting them.
+
 ## Lambda Context
 
 The `LambdaContext` type contains metadata about the invocation:
@@ -129,6 +152,83 @@ type LambdaContext struct {
 ```
 
 Access it using `voker.FromContext(ctx)`.
+
+## Logging
+
+Voker logs with the standard library's `log/slog`. By default it creates a logger
+from `AWS_LAMBDA_LOG_FORMAT` and `AWS_LAMBDA_LOG_LEVEL` using slog's built-in JSON
+or text handlers. Provide your own with `voker.WithLogger`.
+
+For ideal Lambda logging behavior, the optional `vokerslog` subpackage offers a
+`slog.Handler` tuned for [AWS Lambda advanced logging controls](https://docs.aws.amazon.com/lambda/latest/dg/monitoring-cloudwatchlogs-advanced.html).
+It is opt-in (import it only when you want it) and adds no extra dependency — the
+request ID is read from `voker.FromContext` rather than `aws-lambda-go`.
+
+```go
+import (
+    "log/slog"
+    "os"
+
+    "github.com/hotsock/voker"
+    "github.com/hotsock/voker/vokerslog"
+)
+
+func main() {
+    logger := slog.New(vokerslog.NewHandler(os.Stdout))
+    slog.SetDefault(logger)
+
+    voker.Start(handler, voker.WithLogger(logger))
+}
+```
+
+`NewHandler` auto-configures format (JSON or text) and level from
+`AWS_LAMBDA_LOG_FORMAT` and `AWS_LAMBDA_LOG_LEVEL`, and enriches every record with
+Lambda metadata (function name, version, and the request ID from the invocation
+context). Options override the environment values:
+
+| Option | Description |
+|---|---|
+| `WithJSON()` | Output in JSON format |
+| `WithText()` | Output in text format |
+| `WithLevel(slog.Leveler)` | Set the minimum log level |
+| `WithSource()` | Include source file, function, and line number |
+| `WithType(string)` | Set the `type` field (default: `"app.log"`) |
+| `WithoutTime()` | Omit the timestamp |
+
+In addition to the standard slog levels, the handler maps Lambda's `TRACE`
+(`slog.LevelDebug - 4`) and `FATAL` (`slog.LevelError + 4`) levels. A JSON record
+looks like:
+
+```json
+{"level":"INFO","msg":"Lambda Invoked","record":{"functionName":"my-func","version":"$LATEST","requestId":"abc-123"},"type":"app.log"}
+```
+
+### The `type` field
+
+The `type` + `record` envelope mirrors the shape of [AWS Lambda Telemetry API
+events](https://docs.aws.amazon.com/lambda/latest/dg/telemetry-schema-reference.html),
+so `type` works best as a low-cardinality category for filtering and routing
+logs (e.g. `filter type = "app.request"` in CloudWatch Logs Insights) rather
+than for per-request data. AWS reserves `function`, `extension`, and
+`platform.*`; a dotted `app.<category>` namespace avoids collisions and matches
+AWS's style — for example `app.log` (the default), `app.request`, or
+`app.audit`.
+
+The default comes from `WithType` (or `"app.log"`). A single record can override
+it with a top-level string attribute keyed `vokerslog.TypeKey` (`"type"`); the
+attribute sets the record's type instead of being emitted normally. Set it via
+`With` to tag every record from a logger, or per call:
+
+```go
+// All records from this logger are tagged "app.request".
+requests := slog.New(handler).With(vokerslog.TypeKey, "app.request")
+
+// Or override a single record (this wins over any With value):
+slog.InfoContext(ctx, "audit event", vokerslog.TypeKey, "app.audit")
+```
+
+Setting the type to `""` omits the field for that record. An attribute keyed
+`type` inside a group is left untouched and emitted normally.
 
 ## Error Handling
 
@@ -173,12 +273,7 @@ Returns the following (and process exits after panic):
     },
     {
       "label": "handler",
-      "line": 23,
-      "path": "/Users/me/Code/voker/examples/error/main.go"
-    },
-    {
-      "label": "handlerWithLambdaLogging[...].func1",
-      "line": 48,
+      "line": 30,
       "path": "/Users/me/Code/voker/examples/error/main.go"
     },
     {
@@ -198,7 +293,7 @@ Returns the following (and process exits after panic):
     },
     {
       "label": "main",
-      "line": 13,
+      "line": 21,
       "path": "/Users/me/Code/voker/examples/error/main.go"
     },
     {

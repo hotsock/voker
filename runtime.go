@@ -17,15 +17,15 @@ const (
 
 	contentTypeJSON = "application/json"
 
-	headerRequestID       = "lambda-runtime-aws-request-id"
-	headerDeadlineMS      = "lambda-runtime-deadline-ms"
-	headerTraceID         = "lambda-runtime-trace-id"
-	headerCognitoIdentity = "lambda-runtime-cognito-identity"
-	headerClientContext   = "lambda-runtime-client-context"
-	headerFunctionARN     = "lambda-runtime-invoked-function-arn"
+	headerRequestID       = "Lambda-Runtime-Aws-Request-Id"
+	headerDeadlineMS      = "Lambda-Runtime-Deadline-Ms"
+	headerTraceID         = "Lambda-Runtime-Trace-Id"
+	headerCognitoIdentity = "Lambda-Runtime-Cognito-Identity"
+	headerClientContext   = "Lambda-Runtime-Client-Context"
+	headerFunctionARN     = "Lambda-Runtime-Invoked-Function-Arn"
 
-	headerUserAgent   = "user-agent"
-	headerContentType = "content-type"
+	headerUserAgent   = "User-Agent"
+	headerContentType = "Content-Type"
 )
 
 var userAgent = fmt.Sprintf("voker/%s go/%s", vokerVersion, runtime.Version())
@@ -74,7 +74,7 @@ func (c *runtimeClient) next() (*invocation, error) {
 		return nil, fmt.Errorf("unexpected status code from runtime API: %d", resp.StatusCode)
 	}
 
-	payload, err := io.ReadAll(resp.Body)
+	payload, err := readBody(resp)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read invocation payload: %w", err)
 	}
@@ -85,6 +85,18 @@ func (c *runtimeClient) next() (*invocation, error) {
 		headers:   resp.Header,
 		client:    c,
 	}, nil
+}
+
+func readBody(resp *http.Response) ([]byte, error) {
+	if resp.ContentLength < 0 {
+		return io.ReadAll(resp.Body)
+	}
+
+	buf := make([]byte, resp.ContentLength)
+	if _, err := io.ReadFull(resp.Body, buf); err != nil {
+		return nil, err
+	}
+	return buf, nil
 }
 
 const responsePath = "/response"
