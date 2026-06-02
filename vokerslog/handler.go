@@ -261,8 +261,10 @@ var _ slog.Handler = (*Handler)(nil)
 func (h *Handler) appendJSON(buf *buffer, ctx context.Context, record slog.Record) {
 	buf.writeString(`{"level":`)
 	appendJSONString(buf, lambdaLoggerLevelString(record.Level))
-	buf.writeString(`,"msg":`)
-	appendJSONString(buf, record.Message)
+	if record.Message != "" {
+		buf.writeString(`,"msg":`)
+		appendJSONString(buf, record.Message)
+	}
 
 	if !record.Time.IsZero() && !h.excludeTime {
 		buf.writeString(`,"time":`)
@@ -474,9 +476,12 @@ func appendJSONAny(b *buffer, v any) {
 func (h *Handler) appendText(buf *buffer, ctx context.Context, record slog.Record) {
 	buf.writeString("level=")
 	*buf = strconv.AppendQuote(*buf, lambdaLoggerLevelString(record.Level))
-	buf.writeString(" msg=")
-	*buf = strconv.AppendQuote(*buf, record.Message)
 	buf.writeByte(' ')
+	if record.Message != "" {
+		buf.writeString("msg=")
+		*buf = strconv.AppendQuote(*buf, record.Message)
+		buf.writeByte(' ')
+	}
 
 	if !record.Time.IsZero() && !h.excludeTime {
 		buf.writeString(`time="`)

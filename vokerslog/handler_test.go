@@ -243,6 +243,29 @@ func TestHandler(t *testing.T) {
 		assert.JSONEq(t, `{"level":"INFO","msg":"hi"}`, buffer.String())
 	})
 
+	t.Run("an empty message omits the msg field", func(t *testing.T) {
+		t.Run("JSON", func(t *testing.T) {
+			buffer := new(bytes.Buffer)
+			logger := slog.New(vokerslog.NewHandler(buffer, vokerslog.WithJSON(), vokerslog.WithoutTime()))
+
+			logger.Info("", "n", 1)
+
+			assert.JSONEq(t, `{"level":"INFO","type":"app.log","n":1}`, buffer.String())
+		})
+
+		t.Run("Text", func(t *testing.T) {
+			buffer := new(bytes.Buffer)
+			logger := slog.New(vokerslog.NewHandler(buffer, vokerslog.WithText(), vokerslog.WithoutTime()))
+
+			logger.Info("", "n", 1)
+
+			out := buffer.String()
+			assert.NotContains(t, out, "msg=")
+			assert.Contains(t, out, `level="INFO" `)
+			assert.Contains(t, out, " n=1")
+		})
+	})
+
 	t.Run("a type attribute inside a group is not an override", func(t *testing.T) {
 		buffer := new(bytes.Buffer)
 		logger := slog.New(vokerslog.NewHandler(buffer, vokerslog.WithJSON(), vokerslog.WithoutTime())).
