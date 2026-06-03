@@ -1,6 +1,6 @@
 module github.com/hotsock/voker/examples/basic
 
-go 1.25.3
+go 1.26.3
 
 require github.com/hotsock/voker v0.0.0
 

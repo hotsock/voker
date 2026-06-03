@@ -71,6 +71,12 @@ func WithTraceID(enabled bool) Option {
 //
 // Where TIn and TOut are JSON-serializable types.
 //
+// As a special case, a handler may declare TIn as json.RawMessage to receive
+// the invocation payload verbatim. voker skips unmarshaling (and JSON
+// validation) and hands the raw bytes to the handler, which is then
+// responsible for decoding them. This is useful for handlers that work with
+// large payloads and want to measure or control their own decoding.
+//
 // Options can be provided to configure runtime behavior:
 //
 //	voker.Start(handler, voker.WithTraceID(true))
@@ -188,7 +194,22 @@ func callHandler[TIn, TOut any](ctx context.Context, payload []byte, handler fun
 	}()
 
 	var input TIn
-	if err := json.Unmarshal(payload, &input); err != nil {
+
+	// When the handler's input type is json.RawMessage, hand it the raw payload
+	// verbatim and skip unmarshaling entirely. This lets handlers that work with
+	// large payloads measure and control their own decoding rather than paying
+	// for an unmarshal they didn't ask for.
+	//
+	// The payload is aliased, not copied: each invocation receives a fresh
+	// buffer (see runtimeClient.next) that voker never reuses or mutates, so
+	// the handler can safely read it for the duration of the invocation.
+	//
+	// Note: this also bypasses JSON validation. A json.RawMessage handler
+	// receives the bytes as-is, even if the payload is empty or not valid JSON,
+	// and is responsible for handling those cases itself.
+	if raw, ok := any(&input).(*json.RawMessage); ok {
+		*raw = payload
+	} else if err := json.Unmarshal(payload, &input); err != nil {
 		return nil, &ErrorResponse{
 			Message: fmt.Sprintf("failed to unmarshal input: %v", err),
 			Type:    "Runtime.UnmarshalError",
