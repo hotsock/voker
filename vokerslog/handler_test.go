@@ -279,6 +279,18 @@ func TestHandler(t *testing.T) {
 
 	t.Run("includes function metadata from the environment", func(t *testing.T) {
 		t.Setenv("AWS_LAMBDA_FUNCTION_NAME", "my-func")
+		t.Setenv("AWS_LAMBDA_FUNCTION_VERSION", "7")
+
+		buffer := new(bytes.Buffer)
+		logger := slog.New(vokerslog.NewHandler(buffer, vokerslog.WithJSON()))
+
+		logger.Info("hi")
+
+		assert.Contains(t, buffer.String(), `"record":{"functionName":"my-func","version":"7"}`)
+	})
+
+	t.Run("omits the version when the function is unpublished", func(t *testing.T) {
+		t.Setenv("AWS_LAMBDA_FUNCTION_NAME", "my-func")
 		t.Setenv("AWS_LAMBDA_FUNCTION_VERSION", "$LATEST")
 
 		buffer := new(bytes.Buffer)
@@ -286,7 +298,8 @@ func TestHandler(t *testing.T) {
 
 		logger.Info("hi")
 
-		assert.Contains(t, buffer.String(), `"record":{"functionName":"my-func","version":"$LATEST"}`)
+		assert.Contains(t, buffer.String(), `"record":{"functionName":"my-func"}`)
+		assert.NotContains(t, buffer.String(), "version")
 	})
 }
 

@@ -37,6 +37,11 @@ const (
 	lambdaEnvFunctionName    = "AWS_LAMBDA_FUNCTION_NAME"
 	lambdaEnvFunctionVersion = "AWS_LAMBDA_FUNCTION_VERSION"
 
+	// lambdaLatestVersion is Lambda's name for the unpublished version, invoked
+	// implicitly for any unqualified ARN. It carries no information a real
+	// published version number wouldn't, so it is omitted from log records.
+	lambdaLatestVersion = "$LATEST"
+
 	traceLevelDebugOffset = 4
 	fatalLevelErrorOffset = 4
 )
@@ -145,6 +150,9 @@ func NewHandler(w io.Writer, options ...Option) *Handler {
 	}
 	h.functionName, h.hasFunctionName = os.LookupEnv(lambdaEnvFunctionName)
 	h.functionVersion, h.hasFunctionVersion = os.LookupEnv(lambdaEnvFunctionVersion)
+	if h.functionVersion == lambdaLatestVersion {
+		h.hasFunctionVersion = false
+	}
 
 	for _, opt := range options {
 		opt(h)
