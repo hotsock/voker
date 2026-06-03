@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
-	"net/url"
 	"strings"
 )
 
@@ -114,19 +113,7 @@ func (a *APIGatewayV1) Request(ctx context.Context, event APIGatewayV1Request) (
 
 	// Build query string from multi-value parameters (preferred) or single-value
 	uri := event.Path
-	if len(event.MultiValueQueryStringParameters) > 0 {
-		params := url.Values{}
-		for k, vals := range event.MultiValueQueryStringParameters {
-			for _, v := range vals {
-				params.Add(k, v)
-			}
-		}
-		uri += "?" + params.Encode()
-	} else if len(event.QueryStringParameters) > 0 {
-		params := url.Values{}
-		for k, v := range event.QueryStringParameters {
-			params.Set(k, v)
-		}
+	if params := mergedQueryValues(event.QueryStringParameters, event.MultiValueQueryStringParameters); len(params) > 0 {
 		uri += "?" + params.Encode()
 	}
 
@@ -138,18 +125,7 @@ func (a *APIGatewayV1) Request(ctx context.Context, event APIGatewayV1Request) (
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
 
-	// Prefer multi-value headers over single-value
-	if len(event.MultiValueHeaders) > 0 {
-		for k, vals := range event.MultiValueHeaders {
-			for _, v := range vals {
-				req.Header.Add(k, v)
-			}
-		}
-	} else {
-		for k, v := range event.Headers {
-			req.Header.Set(k, v)
-		}
-	}
+	addMergedHeaders(req, event.Headers, event.MultiValueHeaders)
 
 	req.RemoteAddr = event.RequestContext.Identity.SourceIP
 	req.RequestURI = uri
@@ -160,7 +136,7 @@ func (a *APIGatewayV1) Request(ctx context.Context, event APIGatewayV1Request) (
 // Response converts an httptest.ResponseRecorder into an API Gateway v1 response.
 func (a *APIGatewayV1) Response(w *httptest.ResponseRecorder) APIGatewayV1Response {
 	resp := APIGatewayV1Response{
-		StatusCode: w.Code,
+		StatusCode: responseStatusCode(w),
 	}
 
 	// Use MultiValueHeaders to preserve all header values (including multiple Set-Cookie)
@@ -173,7 +149,9 @@ func (a *APIGatewayV1) Response(w *httptest.ResponseRecorder) APIGatewayV1Respon
 	}
 
 	bodyBytes := w.Body.Bytes()
-	if isTextContent(w.Header().Get("content-type")) {
+	if len(bodyBytes) == 0 {
+		resp.Body = ""
+	} else if isTextContent(w.Header().Get("content-type")) {
 		resp.Body = string(bodyBytes)
 	} else {
 		resp.Body = base64.StdEncoding.EncodeToString(bodyBytes)

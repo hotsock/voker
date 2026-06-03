@@ -3,6 +3,7 @@ package vokerhttp
 import (
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -68,6 +69,69 @@ func TestAPIGatewayV1Request_Basic(t *testing.T) {
 	assert.Equal(t, "1.2.3.4", req.RemoteAddr)
 }
 
+func TestAPIGatewayV1Request_AWSDocumentedJSONFixture(t *testing.T) {
+	const fixture = `{
+		"resource": "/{proxy+}",
+		"path": "/path/to/resource",
+		"httpMethod": "POST",
+		"headers": {
+			"Host": "1234567890.execute-api.us-east-1.amazonaws.com",
+			"X-Forwarded-For": "192.0.2.1",
+			"header1": "value1",
+			"header2": "value2"
+		},
+		"multiValueHeaders": {
+			"header1": ["value1"],
+			"header2": ["value1", "value2"]
+		},
+		"queryStringParameters": {
+			"parameter1": "value1",
+			"parameter2": "value"
+		},
+		"multiValueQueryStringParameters": {
+			"parameter1": ["value1", "value2"],
+			"parameter2": ["value"]
+		},
+		"pathParameters": {
+			"proxy": "path/to/resource"
+		},
+		"stageVariables": {
+			"stageVariable1": "value1"
+		},
+		"requestContext": {
+			"accountId": "123456789012",
+			"apiId": "1234567890",
+			"domainName": "1234567890.execute-api.us-east-1.amazonaws.com",
+			"httpMethod": "POST",
+			"identity": {
+				"sourceIp": "192.0.2.1",
+				"userAgent": "agent"
+			},
+			"path": "/prod/path/to/resource",
+			"protocol": "HTTP/1.1",
+			"requestId": "id",
+			"requestTimeEpoch": 1428582896000,
+			"resourcePath": "/{proxy+}",
+			"stage": "prod"
+		},
+		"body": "Hello from Lambda",
+		"isBase64Encoded": false
+	}`
+
+	var event APIGatewayV1Request
+	require.NoError(t, json.Unmarshal([]byte(fixture), &event))
+
+	req, err := (&APIGatewayV1{}).Request(context.Background(), event)
+	require.NoError(t, err)
+
+	assert.Equal(t, "POST", req.Method)
+	assert.Equal(t, "/path/to/resource", req.URL.Path)
+	assert.Equal(t, "1234567890.execute-api.us-east-1.amazonaws.com", req.URL.Host)
+	assert.ElementsMatch(t, []string{"value1", "value2"}, req.URL.Query()["parameter1"])
+	assert.Equal(t, []string{"value1", "value2"}, req.Header.Values("Header2"))
+	assert.Equal(t, "192.0.2.1", req.RemoteAddr)
+}
+
 func TestAPIGatewayV1Request_WithBody(t *testing.T) {
 	adapter := &APIGatewayV1{}
 	event := newTestAPIGatewayV1Request()
@@ -97,6 +161,31 @@ func TestAPIGatewayV1Request_Base64Body(t *testing.T) {
 	assert.Equal(t, "binary data", string(body))
 }
 
+func TestAPIGatewayV1Request_InvalidBase64Body(t *testing.T) {
+	adapter := &APIGatewayV1{}
+	event := newTestAPIGatewayV1Request()
+	event.HTTPMethod = "POST"
+	event.Body = "not!valid!base64!"
+	event.IsBase64Encoded = true
+
+	_, err := adapter.Request(context.Background(), event)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "decode base64 body")
+}
+
+func TestAPIGatewayV1Request_SingleValueQueryFallback(t *testing.T) {
+	adapter := &APIGatewayV1{}
+	event := newTestAPIGatewayV1Request()
+	event.MultiValueQueryStringParameters = nil
+	event.QueryStringParameters = map[string]string{"foo": "bar", "baz": "qux"}
+
+	req, err := adapter.Request(context.Background(), event)
+	require.NoError(t, err)
+
+	assert.Equal(t, "bar", req.URL.Query().Get("foo"))
+	assert.Equal(t, "qux", req.URL.Query().Get("baz"))
+}
+
 func TestAPIGatewayV1Request_MultiValueQueryParams(t *testing.T) {
 	adapter := &APIGatewayV1{}
 	event := newTestAPIGatewayV1Request()
@@ -124,6 +213,37 @@ func TestAPIGatewayV1Request_MultiValueHeaders(t *testing.T) {
 	require.NoError(t, err)
 
 	assert.Equal(t, []string{"text/html", "application/json"}, req.Header.Values("Accept"))
+}
+
+func TestAPIGatewayV1Request_MergesSingleAndMultiValueMaps(t *testing.T) {
+	adapter := &APIGatewayV1{}
+	event := newTestAPIGatewayV1Request()
+	event.QueryStringParameters = map[string]string{
+		"single": "one",
+		"shared": "single-value",
+	}
+	event.MultiValueQueryStringParameters = map[string][]string{
+		"multi":  {"red", "blue"},
+		"shared": {"multi-value"},
+	}
+	event.Headers = map[string]string{
+		"X-Single": "one",
+		"X-Shared": "single-value",
+	}
+	event.MultiValueHeaders = map[string][]string{
+		"X-Multi":  {"red", "blue"},
+		"x-shared": {"multi-value"},
+	}
+
+	req, err := adapter.Request(context.Background(), event)
+	require.NoError(t, err)
+
+	assert.Equal(t, "one", req.URL.Query().Get("single"))
+	assert.ElementsMatch(t, []string{"red", "blue"}, req.URL.Query()["multi"])
+	assert.Equal(t, []string{"multi-value"}, req.URL.Query()["shared"])
+	assert.Equal(t, "one", req.Header.Get("X-Single"))
+	assert.Equal(t, []string{"red", "blue"}, req.Header.Values("X-Multi"))
+	assert.Equal(t, []string{"multi-value"}, req.Header.Values("X-Shared"))
 }
 
 func TestAPIGatewayV1Request_FallsBackToSingleValueHeaders(t *testing.T) {
@@ -179,6 +299,17 @@ func TestAPIGatewayV1Response_TextBody(t *testing.T) {
 
 	assert.Equal(t, 200, resp.StatusCode)
 	assert.Equal(t, "<h1>Hello</h1>", resp.Body)
+	assert.False(t, resp.IsBase64Encoded)
+}
+
+func TestAPIGatewayV1Response_ImplicitStatusOK(t *testing.T) {
+	adapter := &APIGatewayV1{}
+	recorder := httptest.NewRecorder()
+	recorder.Header().Set("Content-Type", "text/plain")
+
+	resp := adapter.Response(recorder)
+
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
 	assert.False(t, resp.IsBase64Encoded)
 }
 

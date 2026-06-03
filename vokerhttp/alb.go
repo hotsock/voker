@@ -7,7 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
-	"net/url"
+	"sort"
 	"strings"
 )
 
@@ -15,7 +15,12 @@ import (
 // Lambda target group events.
 //
 //	vokerhttp.StartHTTP(mux, &vokerhttp.ALB{})
-type ALB struct{}
+type ALB struct {
+	// MultiValueHeaders controls whether responses use the ALB
+	// multiValueHeaders format. Set this to true when the Lambda target group
+	// has the lambda.multi_value_headers.enabled attribute enabled.
+	MultiValueHeaders bool
+}
 
 // ALBRequest is the ALB Lambda target group event.
 type ALBRequest struct {
@@ -59,23 +64,9 @@ func (a *ALB) Request(ctx context.Context, event ALBRequest) (*http.Request, err
 		}
 	}
 
-	// Build URL from path and query string parameters.
-	// Prefer multi-value query string parameters over single-value.
 	uri := event.Path
-	if len(event.MultiValueQueryStringParameters) > 0 {
-		params := url.Values{}
-		for k, vals := range event.MultiValueQueryStringParameters {
-			for _, v := range vals {
-				params.Add(k, v)
-			}
-		}
-		uri += "?" + params.Encode()
-	} else if len(event.QueryStringParameters) > 0 {
-		params := url.Values{}
-		for k, v := range event.QueryStringParameters {
-			params.Set(k, v)
-		}
-		uri += "?" + params.Encode()
+	if query := buildALBRawQuery(event.QueryStringParameters, event.MultiValueQueryStringParameters); query != "" {
+		uri += "?" + query
 	}
 
 	// Resolve host and scheme from headers (prefer multi-value if available)
@@ -120,32 +111,99 @@ func (a *ALB) Request(ctx context.Context, event ALBRequest) (*http.Request, err
 // multi-value headers over single-value headers.
 func headerValue(single map[string]string, multi map[string][]string, key string) string {
 	if len(multi) > 0 {
-		if vals := multi[key]; len(vals) > 0 {
-			return vals[0]
+		for k, vals := range multi {
+			if strings.EqualFold(k, key) && len(vals) > 0 {
+				return vals[0]
+			}
 		}
 		return ""
 	}
-	return single[key]
+	for k, v := range single {
+		if strings.EqualFold(k, key) {
+			return v
+		}
+	}
+	return ""
+}
+
+func buildALBRawQuery(single map[string]string, multi map[string][]string) string {
+	// ALB passes URL-encoded query parameter values through without decoding
+	// them first, so these helpers preserve event values as-is instead of
+	// applying url.Values escaping. The event maps do not preserve the original
+	// parameter ordering.
+	if len(multi) > 0 {
+		return encodeALBRawMultiQuery(multi)
+	}
+	if len(single) > 0 {
+		return encodeALBRawSingleQuery(single)
+	}
+	return ""
+}
+
+func encodeALBRawSingleQuery(values map[string]string) string {
+	keys := make([]string, 0, len(values))
+	for k := range values {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+
+	parts := make([]string, 0, len(values))
+	for _, k := range keys {
+		parts = append(parts, k+"="+values[k])
+	}
+	return strings.Join(parts, "&")
+}
+
+func encodeALBRawMultiQuery(values map[string][]string) string {
+	keys := make([]string, 0, len(values))
+	for k := range values {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+
+	var parts []string
+	for _, k := range keys {
+		for _, v := range values[k] {
+			parts = append(parts, k+"="+v)
+		}
+	}
+	return strings.Join(parts, "&")
 }
 
 // Response converts an httptest.ResponseRecorder into an ALB response.
 func (a *ALB) Response(w *httptest.ResponseRecorder) ALBResponse {
+	code := responseStatusCode(w)
 	resp := ALBResponse{
-		StatusCode:        w.Code,
-		StatusDescription: fmt.Sprintf("%d %s", w.Code, http.StatusText(w.Code)),
+		StatusCode:        code,
+		StatusDescription: fmt.Sprintf("%d %s", code, http.StatusText(code)),
 	}
 
-	headers := make(map[string]string)
-	for k, vals := range w.Header() {
-		// ALB single-value headers: last value wins for duplicates
-		headers[strings.ToLower(k)] = vals[len(vals)-1]
-	}
-	if len(headers) > 0 {
-		resp.Headers = headers
+	if a.MultiValueHeaders {
+		multiHeaders := make(map[string][]string)
+		for k, vals := range w.Header() {
+			multiHeaders[strings.ToLower(k)] = append([]string(nil), vals...)
+		}
+		if len(multiHeaders) > 0 {
+			resp.MultiValueHeaders = multiHeaders
+		}
+	} else {
+		headers := make(map[string]string)
+		for k, vals := range w.Header() {
+			if len(vals) == 0 {
+				continue
+			}
+			// ALB single-value headers: last value wins for duplicates
+			headers[strings.ToLower(k)] = vals[len(vals)-1]
+		}
+		if len(headers) > 0 {
+			resp.Headers = headers
+		}
 	}
 
 	bodyBytes := w.Body.Bytes()
-	if isTextContent(w.Header().Get("content-type")) {
+	if len(bodyBytes) == 0 {
+		resp.Body = ""
+	} else if isTextContent(w.Header().Get("content-type")) {
 		resp.Body = string(bodyBytes)
 	} else {
 		resp.Body = base64.StdEncoding.EncodeToString(bodyBytes)

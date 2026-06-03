@@ -27,26 +27,26 @@ func (a *FunctionURL) Response(w *httptest.ResponseRecorder) FunctionURLResponse
 }
 
 // FunctionURLRequest is the Lambda Function URL event (payload format 2.0).
-type FunctionURLRequest = payloadV2Request
+type FunctionURLRequest payloadV2Request
 
 // FunctionURLResponse is the Lambda Function URL response (payload format 2.0).
-type FunctionURLResponse = payloadV2Response
+type FunctionURLResponse payloadV2Response
 
 // payloadV2Request is the shared event shape for payload format 2.0,
 // used by both Lambda Function URLs and API Gateway v2 HTTP APIs.
 type payloadV2Request struct {
-	Version               string                 `json:"version"`
-	RouteKey              string                 `json:"routeKey"`
-	RawPath               string                 `json:"rawPath"`
-	RawQueryString        string                 `json:"rawQueryString"`
-	Cookies               []string               `json:"cookies"`
-	Headers               map[string]string      `json:"headers"`
-	QueryStringParameters map[string]string      `json:"queryStringParameters"`
-	PathParameters        map[string]string      `json:"pathParameters"`
-	StageVariables        map[string]string      `json:"stageVariables"`
+	Version               string                  `json:"version"`
+	RouteKey              string                  `json:"routeKey"`
+	RawPath               string                  `json:"rawPath"`
+	RawQueryString        string                  `json:"rawQueryString"`
+	Cookies               []string                `json:"cookies"`
+	Headers               map[string]string       `json:"headers"`
+	QueryStringParameters map[string]string       `json:"queryStringParameters"`
+	PathParameters        map[string]string       `json:"pathParameters"`
+	StageVariables        map[string]string       `json:"stageVariables"`
 	RequestContext        PayloadV2RequestContext `json:"requestContext"`
-	Body                  string                 `json:"body"`
-	IsBase64Encoded       bool                   `json:"isBase64Encoded"`
+	Body                  string                  `json:"body"`
+	IsBase64Encoded       bool                    `json:"isBase64Encoded"`
 }
 
 // PayloadV2RequestContext contains the request context for payload format 2.0 events.
@@ -147,13 +147,15 @@ func buildV2Request(ctx context.Context, event payloadV2Request) (*http.Request,
 		}
 	}
 
-	// Build URL
 	uri := event.RawPath
 	if event.RawQueryString != "" {
 		uri += "?" + event.RawQueryString
 	}
 
-	host := event.Headers["host"]
+	host := headerValue(event.Headers, nil, "host")
+	if host == "" {
+		host = event.RequestContext.DomainName
+	}
 	url := "https://" + host + uri
 
 	req, err := http.NewRequestWithContext(ctx, event.RequestContext.HTTP.Method, url, bytes.NewReader(body))
@@ -180,7 +182,7 @@ func buildV2Request(ctx context.Context, event payloadV2Request) (*http.Request,
 
 func buildV2Response(w *httptest.ResponseRecorder) payloadV2Response {
 	resp := payloadV2Response{
-		StatusCode: w.Code,
+		StatusCode: responseStatusCode(w),
 	}
 
 	// Flatten headers, separating Set-Cookie into the cookies array
@@ -197,9 +199,10 @@ func buildV2Response(w *httptest.ResponseRecorder) payloadV2Response {
 		resp.Headers = headers
 	}
 
-	// Encode body
 	bodyBytes := w.Body.Bytes()
-	if isTextContent(w.Header().Get("content-type")) {
+	if len(bodyBytes) == 0 {
+		resp.Body = ""
+	} else if isTextContent(w.Header().Get("content-type")) {
 		resp.Body = string(bodyBytes)
 	} else {
 		resp.Body = base64.StdEncoding.EncodeToString(bodyBytes)

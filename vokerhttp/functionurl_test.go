@@ -3,6 +3,7 @@ package vokerhttp
 import (
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -58,6 +59,73 @@ func TestFunctionURLRequest_Basic(t *testing.T) {
 	assert.Equal(t, "/my/path?foo=bar&baz=qux", req.RequestURI)
 }
 
+func TestFunctionURLRequest_AWSDocumentedJSONFixture(t *testing.T) {
+	const fixture = `{
+		"version": "2.0",
+		"routeKey": "$default",
+		"rawPath": "/my/path",
+		"rawQueryString": "parameter1=value1&parameter1=value2&parameter2=value",
+		"cookies": ["Cookie_1=Value_1", "Cookie_2=Value_2"],
+		"headers": {
+			"header1": "value1",
+			"header2": "value1,value2",
+			"host": "abc123.lambda-url.us-east-1.on.aws"
+		},
+		"queryStringParameters": {
+			"parameter1": "value1,value2",
+			"parameter2": "value"
+		},
+		"requestContext": {
+			"accountId": "123456789012",
+			"apiId": "abc123",
+			"domainName": "abc123.lambda-url.us-east-1.on.aws",
+			"domainPrefix": "abc123",
+			"http": {
+				"method": "GET",
+				"path": "/my/path",
+				"protocol": "HTTP/1.1",
+				"sourceIp": "192.0.2.1",
+				"userAgent": "agent"
+			},
+			"requestId": "id",
+			"routeKey": "$default",
+			"stage": "$default",
+			"time": "12/Mar/2020:19:03:58 +0000",
+			"timeEpoch": 1583348638390
+		},
+		"body": "Hello from Lambda",
+		"isBase64Encoded": false
+	}`
+
+	var event FunctionURLRequest
+	require.NoError(t, json.Unmarshal([]byte(fixture), &event))
+
+	req, err := (&FunctionURL{}).Request(context.Background(), event)
+	require.NoError(t, err)
+
+	assert.Equal(t, "GET", req.Method)
+	assert.Equal(t, "/my/path", req.URL.Path)
+	assert.Equal(t, "parameter1=value1&parameter1=value2&parameter2=value", req.URL.RawQuery)
+	assert.Equal(t, "abc123.lambda-url.us-east-1.on.aws", req.URL.Host)
+	cookies := req.Cookies()
+	require.Len(t, cookies, 2)
+	assert.Equal(t, "Cookie_1", cookies[0].Name)
+	assert.Equal(t, "Value_1", cookies[0].Value)
+	assert.Equal(t, "Cookie_2", cookies[1].Name)
+	assert.Equal(t, "Value_2", cookies[1].Value)
+}
+
+func TestFunctionURLRequest_DomainNameFallbackHost(t *testing.T) {
+	adapter := &FunctionURL{}
+	event := newTestFunctionURLRequest()
+	delete(event.Headers, "host")
+
+	req, err := adapter.Request(context.Background(), event)
+	require.NoError(t, err)
+
+	assert.Equal(t, "abc123.lambda-url.us-east-1.on.aws", req.URL.Host)
+}
+
 func TestFunctionURLRequest_WithBody(t *testing.T) {
 	adapter := &FunctionURL{}
 	event := newTestFunctionURLRequest()
@@ -85,6 +153,18 @@ func TestFunctionURLRequest_Base64Body(t *testing.T) {
 	body, err := io.ReadAll(req.Body)
 	require.NoError(t, err)
 	assert.Equal(t, "binary data", string(body))
+}
+
+func TestFunctionURLRequest_InvalidBase64Body(t *testing.T) {
+	adapter := &FunctionURL{}
+	event := newTestFunctionURLRequest()
+	event.RequestContext.HTTP.Method = "POST"
+	event.Body = "not!valid!base64!"
+	event.IsBase64Encoded = true
+
+	_, err := adapter.Request(context.Background(), event)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "decode base64 body")
 }
 
 func TestFunctionURLRequest_EmptyQueryString(t *testing.T) {
@@ -158,6 +238,17 @@ func TestFunctionURLResponse_JSONBody(t *testing.T) {
 	resp := adapter.Response(recorder)
 
 	assert.Equal(t, `{"ok":true}`, resp.Body)
+	assert.False(t, resp.IsBase64Encoded)
+}
+
+func TestFunctionURLResponse_ImplicitStatusOK(t *testing.T) {
+	adapter := &FunctionURL{}
+	recorder := httptest.NewRecorder()
+	recorder.Header().Set("Content-Type", "text/plain")
+
+	resp := adapter.Response(recorder)
+
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
 	assert.False(t, resp.IsBase64Encoded)
 }
 

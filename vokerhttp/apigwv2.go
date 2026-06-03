@@ -13,17 +13,17 @@ import (
 type APIGatewayV2 struct{}
 
 // APIGatewayV2Request is the API Gateway v2 HTTP API event (payload format 2.0).
-type APIGatewayV2Request = payloadV2Request
+type APIGatewayV2Request payloadV2Request
 
 // APIGatewayV2Response is the API Gateway v2 HTTP API response (payload format 2.0).
-type APIGatewayV2Response = payloadV2Response
+type APIGatewayV2Response payloadV2Response
 
 // Request converts an API Gateway v2 event into an *http.Request.
 func (a *APIGatewayV2) Request(ctx context.Context, event APIGatewayV2Request) (*http.Request, error) {
-	return buildV2Request(ctx, event)
+	return buildV2Request(ctx, payloadV2Request(event))
 }
 
 // Response converts an httptest.ResponseRecorder into an API Gateway v2 response.
 func (a *APIGatewayV2) Response(w *httptest.ResponseRecorder) APIGatewayV2Response {
-	return buildV2Response(w)
+	return APIGatewayV2Response(buildV2Response(w))
 }

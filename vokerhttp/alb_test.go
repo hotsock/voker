@@ -3,6 +3,7 @@ package vokerhttp
 import (
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -57,6 +58,41 @@ func TestALBRequest_Basic(t *testing.T) {
 	assert.Equal(t, "72.21.198.66", req.RemoteAddr)
 }
 
+func TestALBRequest_AWSDocumentedJSONFixture(t *testing.T) {
+	const fixture = `{
+		"requestContext": {
+			"elb": {
+				"targetGroupArn": "arn:aws:elasticloadbalancing:us-east-1:123456789012:targetgroup/lambda-tg/abcdef123456"
+			}
+		},
+		"httpMethod": "GET",
+		"path": "/lambda",
+		"queryStringParameters": {
+			"name": "lambda"
+		},
+		"headers": {
+			"host": "example.com",
+			"x-forwarded-for": "192.0.2.1",
+			"x-forwarded-port": "443",
+			"x-forwarded-proto": "https"
+		},
+		"body": "",
+		"isBase64Encoded": false
+	}`
+
+	var event ALBRequest
+	require.NoError(t, json.Unmarshal([]byte(fixture), &event))
+
+	req, err := (&ALB{}).Request(context.Background(), event)
+	require.NoError(t, err)
+
+	assert.Equal(t, "GET", req.Method)
+	assert.Equal(t, "/lambda", req.URL.Path)
+	assert.Equal(t, "name=lambda", req.URL.RawQuery)
+	assert.Equal(t, "example.com", req.URL.Host)
+	assert.Equal(t, "192.0.2.1", req.RemoteAddr)
+}
+
 func TestALBRequest_WithBody(t *testing.T) {
 	adapter := &ALB{}
 	event := newTestALBRequest()
@@ -109,6 +145,159 @@ func TestALBRequest_MultipleForwardedIPs(t *testing.T) {
 	assert.Equal(t, "72.21.198.66", req.RemoteAddr)
 }
 
+func TestALBRequest_InvalidBase64Body(t *testing.T) {
+	adapter := &ALB{}
+	event := newTestALBRequest()
+	event.HTTPMethod = "POST"
+	event.Body = "not!valid!base64!"
+	event.IsBase64Encoded = true
+
+	_, err := adapter.Request(context.Background(), event)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "decode base64 body")
+}
+
+func TestALBRequest_MultiValueHeadersAndQuery(t *testing.T) {
+	adapter := &ALB{}
+	event := newTestALBRequest()
+	// When multi-value headers are enabled, ALB sends only the multi-value maps.
+	event.Headers = nil
+	event.QueryStringParameters = nil
+	event.MultiValueHeaders = map[string][]string{
+		"host":              {"my-alb-123.us-east-1.elb.amazonaws.com"},
+		"x-forwarded-proto": {"https"},
+		"x-forwarded-for":   {"72.21.198.66, 10.0.0.1"},
+		"accept":            {"text/html", "application/json"},
+	}
+	event.MultiValueQueryStringParameters = map[string][]string{
+		"color": {"red", "blue"},
+	}
+
+	req, err := adapter.Request(context.Background(), event)
+	require.NoError(t, err)
+
+	assert.Equal(t, "my-alb-123.us-east-1.elb.amazonaws.com", req.URL.Host)
+	assert.Equal(t, "https", req.URL.Scheme)
+	assert.Equal(t, "72.21.198.66", req.RemoteAddr)
+	assert.Equal(t, []string{"text/html", "application/json"}, req.Header.Values("Accept"))
+	assert.ElementsMatch(t, []string{"red", "blue"}, req.URL.Query()["color"])
+}
+
+func TestALBRequest_AWSMultiValueJSONFixture(t *testing.T) {
+	const fixture = `{
+		"requestContext": {
+			"elb": {
+				"targetGroupArn": "arn:aws:elasticloadbalancing:us-east-1:123456789012:targetgroup/lambda-tg/abcdef123456"
+			}
+		},
+		"httpMethod": "GET",
+		"path": "/lambda",
+		"multiValueQueryStringParameters": {
+			"name": ["lambda"],
+			"color": ["red", "blue"]
+		},
+		"multiValueHeaders": {
+			"host": ["example.com"],
+			"x-forwarded-for": ["192.0.2.1"],
+			"x-forwarded-port": ["443"],
+			"x-forwarded-proto": ["https"],
+			"accept": ["text/html", "application/json"]
+		},
+		"body": "",
+		"isBase64Encoded": false
+	}`
+
+	var event ALBRequest
+	require.NoError(t, json.Unmarshal([]byte(fixture), &event))
+
+	req, err := (&ALB{}).Request(context.Background(), event)
+	require.NoError(t, err)
+
+	assert.Equal(t, "example.com", req.URL.Host)
+	assert.Equal(t, []string{"text/html", "application/json"}, req.Header.Values("Accept"))
+	assert.ElementsMatch(t, []string{"red", "blue"}, req.URL.Query()["color"])
+	assert.Equal(t, "192.0.2.1", req.RemoteAddr)
+}
+
+func TestALBRequest_SchemeFallbackAndMissingHost(t *testing.T) {
+	adapter := &ALB{}
+	event := newTestALBRequest()
+	// No x-forwarded-proto and no host: scheme defaults to https, host empty.
+	delete(event.Headers, "x-forwarded-proto")
+	delete(event.Headers, "host")
+
+	req, err := adapter.Request(context.Background(), event)
+	require.NoError(t, err)
+
+	assert.Equal(t, "https", req.URL.Scheme)
+	assert.Equal(t, "", req.URL.Host)
+}
+
+func TestALBRequest_HTTPScheme(t *testing.T) {
+	adapter := &ALB{}
+	event := newTestALBRequest()
+	event.Headers["x-forwarded-proto"] = "http"
+
+	req, err := adapter.Request(context.Background(), event)
+	require.NoError(t, err)
+
+	assert.Equal(t, "http", req.URL.Scheme)
+}
+
+func TestALBRequest_PreservesEncodedQueryParameters(t *testing.T) {
+	adapter := &ALB{}
+	event := newTestALBRequest()
+	event.QueryStringParameters = map[string]string{
+		"redirect": "https%3A%2F%2Fexample.com%2Fa%2Fb",
+		"space":    "a%20b",
+	}
+
+	req, err := adapter.Request(context.Background(), event)
+	require.NoError(t, err)
+
+	assert.Equal(t, "redirect=https%3A%2F%2Fexample.com%2Fa%2Fb&space=a%20b", req.URL.RawQuery)
+	assert.NotContains(t, req.URL.RawQuery, "%252F")
+	assert.Equal(t, "https://example.com/a/b", req.URL.Query().Get("redirect"))
+	assert.Equal(t, "a b", req.URL.Query().Get("space"))
+}
+
+func TestALBRequest_RawQueryEdgeCases(t *testing.T) {
+	adapter := &ALB{}
+	event := newTestALBRequest()
+	event.QueryStringParameters = map[string]string{
+		"empty":       "",
+		"encodedPlus": "a%2Bb",
+		"embedded":    "a%26b",
+		"literalPlus": "a+b",
+	}
+
+	req, err := adapter.Request(context.Background(), event)
+	require.NoError(t, err)
+
+	assert.Equal(t, "embedded=a%26b&empty=&encodedPlus=a%2Bb&literalPlus=a+b", req.URL.RawQuery)
+	assert.Equal(t, "a&b", req.URL.Query().Get("embedded"))
+	assert.Equal(t, "", req.URL.Query().Get("empty"))
+	assert.Equal(t, "a+b", req.URL.Query().Get("encodedPlus"))
+	assert.Equal(t, "a b", req.URL.Query().Get("literalPlus"))
+}
+
+func TestALBRequest_PreservesMultiValueRawQueryParameters(t *testing.T) {
+	adapter := &ALB{}
+	event := newTestALBRequest()
+	event.QueryStringParameters = nil
+	event.MultiValueQueryStringParameters = map[string][]string{
+		"color": {"red", "blue"},
+		"empty": {""},
+	}
+
+	req, err := adapter.Request(context.Background(), event)
+	require.NoError(t, err)
+
+	assert.Equal(t, "color=red&color=blue&empty=", req.URL.RawQuery)
+	assert.ElementsMatch(t, []string{"red", "blue"}, req.URL.Query()["color"])
+	assert.Equal(t, "", req.URL.Query().Get("empty"))
+}
+
 func TestALBRequest_ContextPropagation(t *testing.T) {
 	adapter := &ALB{}
 	event := newTestALBRequest()
@@ -139,6 +328,18 @@ func TestALBResponse_TextBody(t *testing.T) {
 	assert.Equal(t, 200, resp.StatusCode)
 	assert.Equal(t, "200 OK", resp.StatusDescription)
 	assert.Equal(t, "<h1>Hello</h1>", resp.Body)
+	assert.False(t, resp.IsBase64Encoded)
+}
+
+func TestALBResponse_ImplicitStatusOK(t *testing.T) {
+	adapter := &ALB{}
+	recorder := httptest.NewRecorder()
+	recorder.Header().Set("Content-Type", "text/plain")
+
+	resp := adapter.Response(recorder)
+
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	assert.Equal(t, "200 OK", resp.StatusDescription)
 	assert.False(t, resp.IsBase64Encoded)
 }
 
@@ -194,4 +395,22 @@ func TestALBResponse_SetCookieInHeaders(t *testing.T) {
 
 	// ALB uses headers map for cookies (no top-level cookies field)
 	assert.Equal(t, "session=abc; HttpOnly", resp.Headers["set-cookie"])
+}
+
+func TestALBResponse_MultiValueHeaders(t *testing.T) {
+	adapter := &ALB{MultiValueHeaders: true}
+	recorder := httptest.NewRecorder()
+	recorder.Header().Set("Content-Type", "text/plain")
+	recorder.Header().Add("Set-Cookie", "session=abc; HttpOnly")
+	recorder.Header().Add("Set-Cookie", "theme=dark; Path=/")
+	recorder.Header().Add("X-Custom", "val1")
+	recorder.Header().Add("X-Custom", "val2")
+	recorder.WriteHeader(http.StatusOK)
+	recorder.Write([]byte("ok"))
+
+	resp := adapter.Response(recorder)
+
+	assert.Nil(t, resp.Headers)
+	assert.Equal(t, []string{"session=abc; HttpOnly", "theme=dark; Path=/"}, resp.MultiValueHeaders["set-cookie"])
+	assert.Equal(t, []string{"val1", "val2"}, resp.MultiValueHeaders["x-custom"])
 }

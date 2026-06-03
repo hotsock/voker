@@ -3,6 +3,7 @@ package vokerhttp
 import (
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -57,6 +58,75 @@ func TestAPIGatewayV2Request_Basic(t *testing.T) {
 	assert.Equal(t, "value", req.Header.Get("X-Custom"))
 	assert.Equal(t, "1.2.3.4", req.RemoteAddr)
 	assert.Equal(t, "/my/path?foo=bar&baz=qux", req.RequestURI)
+}
+
+func TestAPIGatewayV2Request_AWSDocumentedJSONFixture(t *testing.T) {
+	const fixture = `{
+		"version": "2.0",
+		"routeKey": "$default",
+		"rawPath": "/my/path",
+		"rawQueryString": "parameter1=value1&parameter1=value2&parameter2=value",
+		"cookies": ["cookie1=value1", "cookie2=value2"],
+		"headers": {
+			"header1": "value1",
+			"header2": "value1,value2",
+			"host": "abc123.execute-api.us-east-1.amazonaws.com"
+		},
+		"queryStringParameters": {
+			"parameter1": "value1,value2",
+			"parameter2": "value"
+		},
+		"requestContext": {
+			"accountId": "123456789012",
+			"apiId": "api-id",
+			"domainName": "abc123.execute-api.us-east-1.amazonaws.com",
+			"domainPrefix": "abc123",
+			"http": {
+				"method": "POST",
+				"path": "/my/path",
+				"protocol": "HTTP/1.1",
+				"sourceIp": "192.0.2.1",
+				"userAgent": "agent"
+			},
+			"requestId": "id",
+			"routeKey": "$default",
+			"stage": "$default",
+			"time": "12/Mar/2020:19:03:58 +0000",
+			"timeEpoch": 1583348638390
+		},
+		"body": "Hello from Lambda",
+		"pathParameters": {
+			"parameter1": "value1"
+		},
+		"isBase64Encoded": false,
+		"stageVariables": {
+			"stageVariable1": "value1",
+			"stageVariable2": "value2"
+		}
+	}`
+
+	var event APIGatewayV2Request
+	require.NoError(t, json.Unmarshal([]byte(fixture), &event))
+
+	req, err := (&APIGatewayV2{}).Request(context.Background(), event)
+	require.NoError(t, err)
+
+	assert.Equal(t, "POST", req.Method)
+	assert.Equal(t, "/my/path", req.URL.Path)
+	assert.Equal(t, "parameter1=value1&parameter1=value2&parameter2=value", req.URL.RawQuery)
+	assert.Equal(t, "abc123.execute-api.us-east-1.amazonaws.com", req.URL.Host)
+	assert.Equal(t, "192.0.2.1", req.RemoteAddr)
+}
+
+func TestAPIGatewayV2Request_DomainNameFallbackHost(t *testing.T) {
+	adapter := &APIGatewayV2{}
+	event := newTestAPIGatewayV2Request()
+	delete(event.Headers, "host")
+
+	req, err := adapter.Request(context.Background(), event)
+	require.NoError(t, err)
+
+	assert.Equal(t, "abc123.execute-api.us-east-1.amazonaws.com", req.URL.Host)
 }
 
 func TestAPIGatewayV2Request_WithBody(t *testing.T) {
@@ -146,6 +216,17 @@ func TestAPIGatewayV2Response_TextBody(t *testing.T) {
 
 	assert.Equal(t, 200, resp.StatusCode)
 	assert.Equal(t, "<h1>Hello</h1>", resp.Body)
+	assert.False(t, resp.IsBase64Encoded)
+}
+
+func TestAPIGatewayV2Response_ImplicitStatusOK(t *testing.T) {
+	adapter := &APIGatewayV2{}
+	recorder := httptest.NewRecorder()
+	recorder.Header().Set("Content-Type", "text/plain")
+
+	resp := adapter.Response(recorder)
+
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
 	assert.False(t, resp.IsBase64Encoded)
 }
 

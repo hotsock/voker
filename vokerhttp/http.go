@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 
 	"github.com/hotsock/voker"
@@ -53,7 +54,15 @@ type Adapter[E, R any] interface {
 //	vokerhttp.StartHTTP(mux, &vokerhttp.FunctionURL{})
 //	vokerhttp.StartHTTP(mux, &vokerhttp.APIGatewayV2{}, voker.WithLogger(logger))
 func StartHTTP[E, R any](handler http.Handler, adapter Adapter[E, R], opts ...voker.Option) {
-	voker.Start(func(ctx context.Context, event E) (R, error) {
+	voker.Start(eventHandler(handler, adapter), opts...)
+}
+
+// eventHandler builds the typed Lambda handler that StartHTTP passes to
+// [voker.Start]. It is kept separate from StartHTTP so the event-to-request
+// conversion, context propagation, and response conversion can be exercised
+// without running the blocking runtime loop.
+func eventHandler[E, R any](handler http.Handler, adapter Adapter[E, R]) func(context.Context, E) (R, error) {
+	return func(ctx context.Context, event E) (R, error) {
 		req, err := adapter.Request(ctx, event)
 		if err != nil {
 			var zero R
@@ -66,7 +75,7 @@ func StartHTTP[E, R any](handler http.Handler, adapter Adapter[E, R], opts ...vo
 		handler.ServeHTTP(recorder, req)
 
 		return adapter.Response(recorder), nil
-	}, opts...)
+	}
 }
 
 // EventFromContext retrieves the original Lambda event from the request context.
@@ -79,6 +88,36 @@ func StartHTTP[E, R any](handler http.Handler, adapter Adapter[E, R], opts ...vo
 func EventFromContext[E any](ctx context.Context) (E, bool) {
 	event, ok := ctx.Value(eventContextKey{}).(E)
 	return event, ok
+}
+
+func responseStatusCode(w *httptest.ResponseRecorder) int {
+	return w.Result().StatusCode
+}
+
+func mergedQueryValues(single map[string]string, multi map[string][]string) url.Values {
+	params := url.Values{}
+	for k, v := range single {
+		params.Set(k, v)
+	}
+	for k, vals := range multi {
+		params.Del(k)
+		for _, v := range vals {
+			params.Add(k, v)
+		}
+	}
+	return params
+}
+
+func addMergedHeaders(req *http.Request, single map[string]string, multi map[string][]string) {
+	for k, v := range single {
+		req.Header.Set(k, v)
+	}
+	for k, vals := range multi {
+		req.Header.Del(k)
+		for _, v := range vals {
+			req.Header.Add(k, v)
+		}
+	}
 }
 
 // isTextContent returns true if the given Content-Type represents text
