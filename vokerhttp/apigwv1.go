@@ -3,10 +3,8 @@ package vokerhttp
 import (
 	"bytes"
 	"context"
-	"encoding/base64"
 	"fmt"
 	"net/http"
-	"net/http/httptest"
 	"strings"
 )
 
@@ -98,17 +96,9 @@ type APIGatewayV1Response struct {
 
 // Request converts an API Gateway v1 event into an *http.Request.
 func (a *APIGatewayV1) Request(ctx context.Context, event APIGatewayV1Request) (*http.Request, error) {
-	var body []byte
-	if event.Body != "" {
-		if event.IsBase64Encoded {
-			var err error
-			body, err = base64.StdEncoding.DecodeString(event.Body)
-			if err != nil {
-				return nil, fmt.Errorf("failed to decode base64 body: %w", err)
-			}
-		} else {
-			body = []byte(event.Body)
-		}
+	body, err := decodeEventBody(event.Body, event.IsBase64Encoded)
+	if err != nil {
+		return nil, err
 	}
 
 	// Build query string from multi-value parameters (preferred) or single-value
@@ -117,7 +107,10 @@ func (a *APIGatewayV1) Request(ctx context.Context, event APIGatewayV1Request) (
 		uri += "?" + params.Encode()
 	}
 
-	host := event.RequestContext.DomainName
+	host := headerValue(event.Headers, event.MultiValueHeaders, "host")
+	if host == "" {
+		host = event.RequestContext.DomainName
+	}
 	fullURL := "https://" + host + uri
 
 	req, err := http.NewRequestWithContext(ctx, event.HTTPMethod, fullURL, bytes.NewReader(body))
@@ -133,30 +126,27 @@ func (a *APIGatewayV1) Request(ctx context.Context, event APIGatewayV1Request) (
 	return req, nil
 }
 
-// Response converts an httptest.ResponseRecorder into an API Gateway v1 response.
-func (a *APIGatewayV1) Response(w *httptest.ResponseRecorder) APIGatewayV1Response {
-	resp := APIGatewayV1Response{
-		StatusCode: responseStatusCode(w),
+// Response converts the handler's *http.Response into an API Gateway v1 response.
+func (a *APIGatewayV1) Response(resp *http.Response) (APIGatewayV1Response, error) {
+	out := APIGatewayV1Response{
+		StatusCode: resp.StatusCode,
+	}
+	// Encode the body first: responseBody may set a sniffed Content-Type on
+	// resp.Header, which must be included in the header map below.
+	var err error
+	out.Body, out.IsBase64Encoded, err = responseBody(resp)
+	if err != nil {
+		return APIGatewayV1Response{}, err
 	}
 
 	// Use MultiValueHeaders to preserve all header values (including multiple Set-Cookie)
 	multiHeaders := make(map[string][]string)
-	for k, vals := range w.Header() {
+	for k, vals := range resp.Header {
 		multiHeaders[strings.ToLower(k)] = vals
 	}
 	if len(multiHeaders) > 0 {
-		resp.MultiValueHeaders = multiHeaders
+		out.MultiValueHeaders = multiHeaders
 	}
 
-	bodyBytes := w.Body.Bytes()
-	if len(bodyBytes) == 0 {
-		resp.Body = ""
-	} else if isTextContent(w.Header().Get("content-type")) {
-		resp.Body = string(bodyBytes)
-	} else {
-		resp.Body = base64.StdEncoding.EncodeToString(bodyBytes)
-		resp.IsBase64Encoded = true
-	}
-
-	return resp
+	return out, nil
 }

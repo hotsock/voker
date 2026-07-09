@@ -3,10 +3,8 @@ package vokerhttp
 import (
 	"bytes"
 	"context"
-	"encoding/base64"
 	"fmt"
 	"net/http"
-	"net/http/httptest"
 	"strings"
 )
 
@@ -21,9 +19,10 @@ func (a *FunctionURL) Request(ctx context.Context, event FunctionURLRequest) (*h
 	return buildV2Request(ctx, payloadV2Request(event))
 }
 
-// Response converts an httptest.ResponseRecorder into a Function URL response.
-func (a *FunctionURL) Response(w *httptest.ResponseRecorder) FunctionURLResponse {
-	return FunctionURLResponse(buildV2Response(w))
+// Response converts the handler's *http.Response into a Function URL response.
+func (a *FunctionURL) Response(resp *http.Response) (FunctionURLResponse, error) {
+	out, err := buildV2Response(resp)
+	return FunctionURLResponse(out), err
 }
 
 // FunctionURLRequest is the Lambda Function URL event (payload format 2.0).
@@ -134,17 +133,9 @@ type payloadV2Response struct {
 }
 
 func buildV2Request(ctx context.Context, event payloadV2Request) (*http.Request, error) {
-	var body []byte
-	if event.Body != "" {
-		if event.IsBase64Encoded {
-			var err error
-			body, err = base64.StdEncoding.DecodeString(event.Body)
-			if err != nil {
-				return nil, fmt.Errorf("failed to decode base64 body: %w", err)
-			}
-		} else {
-			body = []byte(event.Body)
-		}
+	body, err := decodeEventBody(event.Body, event.IsBase64Encoded)
+	if err != nil {
+		return nil, err
 	}
 
 	uri := event.RawPath
@@ -168,10 +159,12 @@ func buildV2Request(ctx context.Context, event payloadV2Request) (*http.Request,
 		req.Header.Set(k, v)
 	}
 
-	// Add cookies from the top-level cookies array
-	for _, c := range event.Cookies {
-		name, value, _ := strings.Cut(c, "=")
-		req.AddCookie(&http.Cookie{Name: name, Value: value})
+	// Restore the Cookie header from the top-level cookies array verbatim.
+	// req.AddCookie is deliberately avoided: it sanitizes values (quoting
+	// values containing spaces or commas, dropping invalid octets), which
+	// would alter what the client actually sent.
+	if len(event.Cookies) > 0 {
+		req.Header.Set("Cookie", strings.Join(event.Cookies, "; "))
 	}
 
 	req.RemoteAddr = event.RequestContext.HTTP.SourceIP
@@ -180,34 +173,31 @@ func buildV2Request(ctx context.Context, event payloadV2Request) (*http.Request,
 	return req, nil
 }
 
-func buildV2Response(w *httptest.ResponseRecorder) payloadV2Response {
-	resp := payloadV2Response{
-		StatusCode: responseStatusCode(w),
+func buildV2Response(resp *http.Response) (payloadV2Response, error) {
+	out := payloadV2Response{
+		StatusCode: resp.StatusCode,
+	}
+	// Encode the body first: responseBody may set a sniffed Content-Type on
+	// resp.Header, which must be included in the header map below.
+	var err error
+	out.Body, out.IsBase64Encoded, err = responseBody(resp)
+	if err != nil {
+		return payloadV2Response{}, err
 	}
 
 	// Flatten headers, separating Set-Cookie into the cookies array
 	headers := make(map[string]string)
-	for k, vals := range w.Header() {
+	for k, vals := range resp.Header {
 		lower := strings.ToLower(k)
 		if lower == "set-cookie" {
-			resp.Cookies = append(resp.Cookies, vals...)
+			out.Cookies = append(out.Cookies, vals...)
 			continue
 		}
 		headers[lower] = strings.Join(vals, ", ")
 	}
 	if len(headers) > 0 {
-		resp.Headers = headers
+		out.Headers = headers
 	}
 
-	bodyBytes := w.Body.Bytes()
-	if len(bodyBytes) == 0 {
-		resp.Body = ""
-	} else if isTextContent(w.Header().Get("content-type")) {
-		resp.Body = string(bodyBytes)
-	} else {
-		resp.Body = base64.StdEncoding.EncodeToString(bodyBytes)
-		resp.IsBase64Encoded = true
-	}
-
-	return resp
+	return out, nil
 }

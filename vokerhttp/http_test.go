@@ -4,7 +4,7 @@ import (
 	"context"
 	"io"
 	"net/http"
-	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -44,14 +44,26 @@ func TestIsTextContent(t *testing.T) {
 }
 
 // errAdapter is an Adapter whose Request always fails, used to exercise the
-// error path in eventHandler.
+// request error path in eventHandler.
 type errAdapter struct{}
 
 func (errAdapter) Request(ctx context.Context, event struct{}) (*http.Request, error) {
 	return nil, io.ErrUnexpectedEOF
 }
 
-func (errAdapter) Response(w *httptest.ResponseRecorder) struct{} { return struct{}{} }
+func (errAdapter) Response(resp *http.Response) (struct{}, error) { return struct{}{}, nil }
+
+// respErrAdapter is an Adapter whose Response always fails, used to exercise
+// the response error path in eventHandler.
+type respErrAdapter struct{}
+
+func (respErrAdapter) Request(ctx context.Context, event struct{}) (*http.Request, error) {
+	return http.NewRequestWithContext(ctx, "GET", "https://example.com/", nil)
+}
+
+func (respErrAdapter) Response(resp *http.Response) (struct{}, error) {
+	return struct{}{}, io.ErrClosedPipe
+}
 
 func TestEventHandler_EndToEnd(t *testing.T) {
 	var gotEvent FunctionURLRequest
@@ -83,12 +95,54 @@ func TestEventHandler_EndToEnd(t *testing.T) {
 }
 
 func TestEventHandler_RequestError(t *testing.T) {
-	handler := eventHandler[struct{}, struct{}](http.NewServeMux(), errAdapter{})
+	handler := eventHandler(http.NewServeMux(), errAdapter{})
 
 	_, err := handler(context.Background(), struct{}{})
 	require.Error(t, err)
 	assert.ErrorIs(t, err, io.ErrUnexpectedEOF)
 	assert.Contains(t, err.Error(), "failed to build http request")
+}
+
+func TestEventHandler_ResponseError(t *testing.T) {
+	handler := eventHandler(http.NewServeMux(), respErrAdapter{})
+
+	_, err := handler(context.Background(), struct{}{})
+	require.Error(t, err)
+	assert.ErrorIs(t, err, io.ErrClosedPipe)
+	assert.Contains(t, err.Error(), "failed to build lambda response")
+}
+
+// TestAdapterResponse_StreamedBody verifies adapters accept any *http.Response,
+// not just recorder output: the body may come from an arbitrary stream.
+func TestAdapterResponse_StreamedBody(t *testing.T) {
+	adapter := &FunctionURL{}
+	resp, err := adapter.Response(&http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"text/plain"}},
+		Body:       io.NopCloser(strings.NewReader("streamed body")),
+	})
+	require.NoError(t, err)
+
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	assert.Equal(t, "streamed body", resp.Body)
+	assert.False(t, resp.IsBase64Encoded)
+}
+
+// failingReader errors mid-stream to exercise the body read error path.
+type failingReader struct{}
+
+func (failingReader) Read([]byte) (int, error) { return 0, io.ErrUnexpectedEOF }
+
+func TestAdapterResponse_BodyReadError(t *testing.T) {
+	adapter := &FunctionURL{}
+	_, err := adapter.Response(&http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{},
+		Body:       io.NopCloser(failingReader{}),
+	})
+	require.Error(t, err)
+	assert.ErrorIs(t, err, io.ErrUnexpectedEOF)
+	assert.Contains(t, err.Error(), "failed to read response body")
 }
 
 func TestEventFromContext(t *testing.T) {

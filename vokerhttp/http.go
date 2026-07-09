@@ -12,7 +12,9 @@ package vokerhttp
 
 import (
 	"context"
+	"encoding/base64"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -35,8 +37,10 @@ type Adapter[E, R any] interface {
 	// Request converts a Lambda event into an *http.Request.
 	Request(ctx context.Context, event E) (*http.Request, error)
 
-	// Response converts a completed ResponseRecorder into a Lambda response.
-	Response(w *httptest.ResponseRecorder) R
+	// Response converts the *http.Response produced by the http.Handler into
+	// a Lambda response. The response body is a stream; implementations that
+	// need the full body must read it and are responsible for closing it.
+	Response(resp *http.Response) (R, error)
 }
 
 // StartHTTP starts the Lambda runtime loop with a standard http.Handler
@@ -74,7 +78,13 @@ func eventHandler[E, R any](handler http.Handler, adapter Adapter[E, R]) func(co
 		recorder := httptest.NewRecorder()
 		handler.ServeHTTP(recorder, req)
 
-		return adapter.Response(recorder), nil
+		response, err := adapter.Response(recorder.Result())
+		if err != nil {
+			var zero R
+			return zero, fmt.Errorf("failed to build lambda response: %w", err)
+		}
+
+		return response, nil
 	}
 }
 
@@ -90,8 +100,67 @@ func EventFromContext[E any](ctx context.Context) (E, bool) {
 	return event, ok
 }
 
-func responseStatusCode(w *httptest.ResponseRecorder) int {
-	return w.Result().StatusCode
+// decodeEventBody returns the raw request body bytes for an event body,
+// decoding base64 when the event flags it as encoded.
+func decodeEventBody(body string, isBase64Encoded bool) ([]byte, error) {
+	if body == "" {
+		return nil, nil
+	}
+	if isBase64Encoded {
+		decoded, err := base64.StdEncoding.DecodeString(body)
+		if err != nil {
+			return nil, fmt.Errorf("failed to decode base64 body: %w", err)
+		}
+		return decoded, nil
+	}
+	return []byte(body), nil
+}
+
+// responseBody returns the Lambda response body for a handler response,
+// base64-encoding non-text content. It consumes and closes resp.Body. When
+// the handler did not set a Content-Type, one is sniffed from the body and
+// set on resp.Header to match net/http servers, which apply
+// http.DetectContentType on the first Write. Callers must invoke this before
+// copying resp.Header into the Lambda response.
+func responseBody(resp *http.Response) (body string, isBase64Encoded bool, err error) {
+	defer resp.Body.Close()
+	bodyBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", false, fmt.Errorf("failed to read response body: %w", err)
+	}
+	if len(bodyBytes) == 0 {
+		return "", false, nil
+	}
+
+	contentType := resp.Header.Get("Content-Type")
+	if contentType == "" {
+		contentType = http.DetectContentType(bodyBytes)
+		resp.Header.Set("Content-Type", contentType)
+	}
+
+	if isTextContent(contentType) {
+		return string(bodyBytes), false, nil
+	}
+	return base64.StdEncoding.EncodeToString(bodyBytes), true, nil
+}
+
+// headerValue returns the first value for a header key, preferring
+// multi-value headers over single-value headers.
+func headerValue(single map[string]string, multi map[string][]string, key string) string {
+	if len(multi) > 0 {
+		for k, vals := range multi {
+			if strings.EqualFold(k, key) && len(vals) > 0 {
+				return vals[0]
+			}
+		}
+		return ""
+	}
+	for k, v := range single {
+		if strings.EqualFold(k, key) {
+			return v
+		}
+	}
+	return ""
 }
 
 func mergedQueryValues(single map[string]string, multi map[string][]string) url.Values {

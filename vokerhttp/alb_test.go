@@ -323,7 +323,8 @@ func TestALBResponse_TextBody(t *testing.T) {
 	recorder.WriteHeader(http.StatusOK)
 	recorder.Write([]byte("<h1>Hello</h1>"))
 
-	resp := adapter.Response(recorder)
+	resp, err := adapter.Response(recorder.Result())
+	require.NoError(t, err)
 
 	assert.Equal(t, 200, resp.StatusCode)
 	assert.Equal(t, "200 OK", resp.StatusDescription)
@@ -336,7 +337,8 @@ func TestALBResponse_ImplicitStatusOK(t *testing.T) {
 	recorder := httptest.NewRecorder()
 	recorder.Header().Set("Content-Type", "text/plain")
 
-	resp := adapter.Response(recorder)
+	resp, err := adapter.Response(recorder.Result())
+	require.NoError(t, err)
 
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
 	assert.Equal(t, "200 OK", resp.StatusDescription)
@@ -351,12 +353,45 @@ func TestALBResponse_BinaryBody(t *testing.T) {
 	data := []byte{0x89, 0x50, 0x4E, 0x47}
 	recorder.Write(data)
 
-	resp := adapter.Response(recorder)
+	resp, err := adapter.Response(recorder.Result())
+	require.NoError(t, err)
 
 	assert.True(t, resp.IsBase64Encoded)
 	decoded, err := base64.StdEncoding.DecodeString(resp.Body)
 	require.NoError(t, err)
 	assert.Equal(t, data, decoded)
+}
+
+func TestALBResponse_NoContentTypeSniffsText(t *testing.T) {
+	adapter := &ALB{}
+	recorder := httptest.NewRecorder()
+	recorder.WriteHeader(http.StatusOK)
+	recorder.Write([]byte("plain text response"))
+
+	resp, err := adapter.Response(recorder.Result())
+	require.NoError(t, err)
+
+	assert.False(t, resp.IsBase64Encoded)
+	assert.Equal(t, "plain text response", resp.Body)
+	assert.Equal(t, "text/plain; charset=utf-8", resp.Headers["content-type"])
+}
+
+func TestALBResponse_SingleValueHeadersLastValueWins(t *testing.T) {
+	// The ALB single-value headers format cannot represent repeated headers;
+	// only the last value of each is kept (see ALB.MultiValueHeaders docs).
+	adapter := &ALB{}
+	recorder := httptest.NewRecorder()
+	recorder.Header().Set("Content-Type", "text/plain")
+	recorder.Header().Add("Set-Cookie", "session=abc; HttpOnly")
+	recorder.Header().Add("Set-Cookie", "theme=dark; Path=/")
+	recorder.WriteHeader(http.StatusOK)
+	recorder.Write([]byte("ok"))
+
+	resp, err := adapter.Response(recorder.Result())
+	require.NoError(t, err)
+
+	assert.Equal(t, "theme=dark; Path=/", resp.Headers["set-cookie"])
+	assert.Nil(t, resp.MultiValueHeaders)
 }
 
 func TestALBResponse_StatusDescription(t *testing.T) {
@@ -378,7 +413,8 @@ func TestALBResponse_StatusDescription(t *testing.T) {
 		recorder.Header().Set("Content-Type", "text/plain")
 		recorder.WriteHeader(tt.code)
 
-		resp := adapter.Response(recorder)
+		resp, err := adapter.Response(recorder.Result())
+		require.NoError(t, err)
 		assert.Equal(t, tt.desc, resp.StatusDescription)
 	}
 }
@@ -391,7 +427,8 @@ func TestALBResponse_SetCookieInHeaders(t *testing.T) {
 	recorder.WriteHeader(http.StatusOK)
 	recorder.Write([]byte("ok"))
 
-	resp := adapter.Response(recorder)
+	resp, err := adapter.Response(recorder.Result())
+	require.NoError(t, err)
 
 	// ALB uses headers map for cookies (no top-level cookies field)
 	assert.Equal(t, "session=abc; HttpOnly", resp.Headers["set-cookie"])
@@ -408,7 +445,8 @@ func TestALBResponse_MultiValueHeaders(t *testing.T) {
 	recorder.WriteHeader(http.StatusOK)
 	recorder.Write([]byte("ok"))
 
-	resp := adapter.Response(recorder)
+	resp, err := adapter.Response(recorder.Result())
+	require.NoError(t, err)
 
 	assert.Nil(t, resp.Headers)
 	assert.Equal(t, []string{"session=abc; HttpOnly", "theme=dark; Path=/"}, resp.MultiValueHeaders["set-cookie"])

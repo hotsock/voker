@@ -3,10 +3,8 @@ package vokerhttp
 import (
 	"bytes"
 	"context"
-	"encoding/base64"
 	"fmt"
 	"net/http"
-	"net/http/httptest"
 	"sort"
 	"strings"
 )
@@ -19,6 +17,11 @@ type ALB struct {
 	// MultiValueHeaders controls whether responses use the ALB
 	// multiValueHeaders format. Set this to true when the Lambda target group
 	// has the lambda.multi_value_headers.enabled attribute enabled.
+	//
+	// When false, the single-value headers format cannot represent repeated
+	// response headers, so only the last value of each header is kept —
+	// notably, all but the last Set-Cookie are dropped. Handlers that set
+	// multiple cookies must use multi-value headers.
 	MultiValueHeaders bool
 }
 
@@ -51,17 +54,9 @@ type ALBResponse struct {
 
 // Request converts an ALB event into an *http.Request.
 func (a *ALB) Request(ctx context.Context, event ALBRequest) (*http.Request, error) {
-	var body []byte
-	if event.Body != "" {
-		if event.IsBase64Encoded {
-			var err error
-			body, err = base64.StdEncoding.DecodeString(event.Body)
-			if err != nil {
-				return nil, fmt.Errorf("failed to decode base64 body: %w", err)
-			}
-		} else {
-			body = []byte(event.Body)
-		}
+	body, err := decodeEventBody(event.Body, event.IsBase64Encoded)
+	if err != nil {
+		return nil, err
 	}
 
 	uri := event.Path
@@ -107,54 +102,19 @@ func (a *ALB) Request(ctx context.Context, event ALBRequest) (*http.Request, err
 	return req, nil
 }
 
-// headerValue returns the first value for a header key, preferring
-// multi-value headers over single-value headers.
-func headerValue(single map[string]string, multi map[string][]string, key string) string {
-	if len(multi) > 0 {
-		for k, vals := range multi {
-			if strings.EqualFold(k, key) && len(vals) > 0 {
-				return vals[0]
-			}
-		}
-		return ""
-	}
-	for k, v := range single {
-		if strings.EqualFold(k, key) {
-			return v
-		}
-	}
-	return ""
-}
-
 func buildALBRawQuery(single map[string]string, multi map[string][]string) string {
 	// ALB passes URL-encoded query parameter values through without decoding
-	// them first, so these helpers preserve event values as-is instead of
-	// applying url.Values escaping. The event maps do not preserve the original
+	// them first, so this preserves event values as-is instead of applying
+	// url.Values escaping. The event maps do not preserve the original
 	// parameter ordering.
-	if len(multi) > 0 {
-		return encodeALBRawMultiQuery(multi)
+	values := multi
+	if len(values) == 0 {
+		values = make(map[string][]string, len(single))
+		for k, v := range single {
+			values[k] = []string{v}
+		}
 	}
-	if len(single) > 0 {
-		return encodeALBRawSingleQuery(single)
-	}
-	return ""
-}
 
-func encodeALBRawSingleQuery(values map[string]string) string {
-	keys := make([]string, 0, len(values))
-	for k := range values {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-
-	parts := make([]string, 0, len(values))
-	for _, k := range keys {
-		parts = append(parts, k+"="+values[k])
-	}
-	return strings.Join(parts, "&")
-}
-
-func encodeALBRawMultiQuery(values map[string][]string) string {
 	keys := make([]string, 0, len(values))
 	for k := range values {
 		keys = append(keys, k)
@@ -170,25 +130,31 @@ func encodeALBRawMultiQuery(values map[string][]string) string {
 	return strings.Join(parts, "&")
 }
 
-// Response converts an httptest.ResponseRecorder into an ALB response.
-func (a *ALB) Response(w *httptest.ResponseRecorder) ALBResponse {
-	code := responseStatusCode(w)
-	resp := ALBResponse{
-		StatusCode:        code,
-		StatusDescription: fmt.Sprintf("%d %s", code, http.StatusText(code)),
+// Response converts the handler's *http.Response into an ALB response.
+func (a *ALB) Response(resp *http.Response) (ALBResponse, error) {
+	out := ALBResponse{
+		StatusCode:        resp.StatusCode,
+		StatusDescription: fmt.Sprintf("%d %s", resp.StatusCode, http.StatusText(resp.StatusCode)),
+	}
+	// Encode the body first: responseBody may set a sniffed Content-Type on
+	// resp.Header, which must be included in the header maps below.
+	var err error
+	out.Body, out.IsBase64Encoded, err = responseBody(resp)
+	if err != nil {
+		return ALBResponse{}, err
 	}
 
 	if a.MultiValueHeaders {
 		multiHeaders := make(map[string][]string)
-		for k, vals := range w.Header() {
+		for k, vals := range resp.Header {
 			multiHeaders[strings.ToLower(k)] = append([]string(nil), vals...)
 		}
 		if len(multiHeaders) > 0 {
-			resp.MultiValueHeaders = multiHeaders
+			out.MultiValueHeaders = multiHeaders
 		}
 	} else {
 		headers := make(map[string]string)
-		for k, vals := range w.Header() {
+		for k, vals := range resp.Header {
 			if len(vals) == 0 {
 				continue
 			}
@@ -196,19 +162,9 @@ func (a *ALB) Response(w *httptest.ResponseRecorder) ALBResponse {
 			headers[strings.ToLower(k)] = vals[len(vals)-1]
 		}
 		if len(headers) > 0 {
-			resp.Headers = headers
+			out.Headers = headers
 		}
 	}
 
-	bodyBytes := w.Body.Bytes()
-	if len(bodyBytes) == 0 {
-		resp.Body = ""
-	} else if isTextContent(w.Header().Get("content-type")) {
-		resp.Body = string(bodyBytes)
-	} else {
-		resp.Body = base64.StdEncoding.EncodeToString(bodyBytes)
-		resp.IsBase64Encoded = true
-	}
-
-	return resp
+	return out, nil
 }

@@ -257,6 +257,33 @@ func TestAPIGatewayV1Request_FallsBackToSingleValueHeaders(t *testing.T) {
 	assert.Equal(t, "application/json", req.Header.Get("Content-Type"))
 }
 
+func TestAPIGatewayV1Request_HostFromHostHeader(t *testing.T) {
+	// The Host header the client sent wins over requestContext.domainName,
+	// matching the payload 2.0 adapters.
+	adapter := &APIGatewayV1{}
+	event := newTestAPIGatewayV1Request()
+	event.Headers["Host"] = "custom.example.com"
+	event.MultiValueHeaders["Host"] = []string{"custom.example.com"}
+
+	req, err := adapter.Request(context.Background(), event)
+	require.NoError(t, err)
+
+	assert.Equal(t, "custom.example.com", req.URL.Host)
+	assert.Equal(t, "custom.example.com", req.Host)
+}
+
+func TestAPIGatewayV1Request_DomainNameFallbackHost(t *testing.T) {
+	adapter := &APIGatewayV1{}
+	event := newTestAPIGatewayV1Request()
+	delete(event.Headers, "Host")
+	delete(event.MultiValueHeaders, "Host")
+
+	req, err := adapter.Request(context.Background(), event)
+	require.NoError(t, err)
+
+	assert.Equal(t, "abc123.execute-api.us-east-1.amazonaws.com", req.URL.Host)
+}
+
 func TestAPIGatewayV1Request_NoQueryString(t *testing.T) {
 	adapter := &APIGatewayV1{}
 	event := newTestAPIGatewayV1Request()
@@ -295,7 +322,8 @@ func TestAPIGatewayV1Response_TextBody(t *testing.T) {
 	recorder.WriteHeader(http.StatusOK)
 	recorder.Write([]byte("<h1>Hello</h1>"))
 
-	resp := adapter.Response(recorder)
+	resp, err := adapter.Response(recorder.Result())
+	require.NoError(t, err)
 
 	assert.Equal(t, 200, resp.StatusCode)
 	assert.Equal(t, "<h1>Hello</h1>", resp.Body)
@@ -307,7 +335,8 @@ func TestAPIGatewayV1Response_ImplicitStatusOK(t *testing.T) {
 	recorder := httptest.NewRecorder()
 	recorder.Header().Set("Content-Type", "text/plain")
 
-	resp := adapter.Response(recorder)
+	resp, err := adapter.Response(recorder.Result())
+	require.NoError(t, err)
 
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
 	assert.False(t, resp.IsBase64Encoded)
@@ -321,12 +350,27 @@ func TestAPIGatewayV1Response_BinaryBody(t *testing.T) {
 	data := []byte{0x89, 0x50, 0x4E, 0x47}
 	recorder.Write(data)
 
-	resp := adapter.Response(recorder)
+	resp, err := adapter.Response(recorder.Result())
+	require.NoError(t, err)
 
 	assert.True(t, resp.IsBase64Encoded)
 	decoded, err := base64.StdEncoding.DecodeString(resp.Body)
 	require.NoError(t, err)
 	assert.Equal(t, data, decoded)
+}
+
+func TestAPIGatewayV1Response_NoContentTypeSniffsText(t *testing.T) {
+	adapter := &APIGatewayV1{}
+	recorder := httptest.NewRecorder()
+	recorder.WriteHeader(http.StatusOK)
+	recorder.Write([]byte("plain text response"))
+
+	resp, err := adapter.Response(recorder.Result())
+	require.NoError(t, err)
+
+	assert.False(t, resp.IsBase64Encoded)
+	assert.Equal(t, "plain text response", resp.Body)
+	assert.Equal(t, []string{"text/plain; charset=utf-8"}, resp.MultiValueHeaders["content-type"])
 }
 
 func TestAPIGatewayV1Response_MultiValueHeaders(t *testing.T) {
@@ -340,7 +384,8 @@ func TestAPIGatewayV1Response_MultiValueHeaders(t *testing.T) {
 	recorder.WriteHeader(http.StatusOK)
 	recorder.Write([]byte("ok"))
 
-	resp := adapter.Response(recorder)
+	resp, err := adapter.Response(recorder.Result())
+	require.NoError(t, err)
 
 	// All headers go into MultiValueHeaders
 	assert.Contains(t, resp.MultiValueHeaders["set-cookie"], "session=abc; HttpOnly")

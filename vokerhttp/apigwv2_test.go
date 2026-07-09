@@ -212,7 +212,8 @@ func TestAPIGatewayV2Response_TextBody(t *testing.T) {
 	recorder.WriteHeader(http.StatusOK)
 	recorder.Write([]byte("<h1>Hello</h1>"))
 
-	resp := adapter.Response(recorder)
+	resp, err := adapter.Response(recorder.Result())
+	require.NoError(t, err)
 
 	assert.Equal(t, 200, resp.StatusCode)
 	assert.Equal(t, "<h1>Hello</h1>", resp.Body)
@@ -224,7 +225,8 @@ func TestAPIGatewayV2Response_ImplicitStatusOK(t *testing.T) {
 	recorder := httptest.NewRecorder()
 	recorder.Header().Set("Content-Type", "text/plain")
 
-	resp := adapter.Response(recorder)
+	resp, err := adapter.Response(recorder.Result())
+	require.NoError(t, err)
 
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
 	assert.False(t, resp.IsBase64Encoded)
@@ -238,7 +240,8 @@ func TestAPIGatewayV2Response_BinaryBody(t *testing.T) {
 	data := []byte{0x00, 0x01, 0x02, 0xFF}
 	recorder.Write(data)
 
-	resp := adapter.Response(recorder)
+	resp, err := adapter.Response(recorder.Result())
+	require.NoError(t, err)
 
 	assert.True(t, resp.IsBase64Encoded)
 	decoded, err := base64.StdEncoding.DecodeString(resp.Body)
@@ -255,7 +258,8 @@ func TestAPIGatewayV2Response_Cookies(t *testing.T) {
 	recorder.WriteHeader(http.StatusOK)
 	recorder.Write([]byte("ok"))
 
-	resp := adapter.Response(recorder)
+	resp, err := adapter.Response(recorder.Result())
+	require.NoError(t, err)
 
 	assert.Len(t, resp.Cookies, 2)
 	assert.Contains(t, resp.Cookies, "session=abc; HttpOnly")
@@ -273,7 +277,8 @@ func TestAPIGatewayV2Response_MultiValueHeaders(t *testing.T) {
 	recorder.WriteHeader(http.StatusOK)
 	recorder.Write([]byte("ok"))
 
-	resp := adapter.Response(recorder)
+	resp, err := adapter.Response(recorder.Result())
+	require.NoError(t, err)
 
 	assert.Equal(t, "val1, val2", resp.Headers["x-custom"])
 }

@@ -3,7 +3,6 @@ package vokerhttp
 import (
 	"context"
 	"net/http"
-	"net/http/httptest"
 )
 
 // APIGatewayV2 implements [Adapter] for API Gateway v2 HTTP API events
@@ -23,7 +22,8 @@ func (a *APIGatewayV2) Request(ctx context.Context, event APIGatewayV2Request) (
 	return buildV2Request(ctx, payloadV2Request(event))
 }
 
-// Response converts an httptest.ResponseRecorder into an API Gateway v2 response.
-func (a *APIGatewayV2) Response(w *httptest.ResponseRecorder) APIGatewayV2Response {
-	return APIGatewayV2Response(buildV2Response(w))
+// Response converts the handler's *http.Response into an API Gateway v2 response.
+func (a *APIGatewayV2) Response(resp *http.Response) (APIGatewayV2Response, error) {
+	out, err := buildV2Response(resp)
+	return APIGatewayV2Response(out), err
 }

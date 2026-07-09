@@ -195,6 +195,19 @@ func TestFunctionURLRequest_Cookies(t *testing.T) {
 	assert.Equal(t, "dark", cookies[1].Value)
 }
 
+func TestFunctionURLRequest_CookieValuesPreservedVerbatim(t *testing.T) {
+	// Cookie values containing spaces or commas must reach the handler
+	// exactly as the client sent them, without sanitization or quoting.
+	adapter := &FunctionURL{}
+	event := newTestFunctionURLRequest()
+	event.Cookies = []string{"session=a b c", "pair=x,y"}
+
+	req, err := adapter.Request(context.Background(), event)
+	require.NoError(t, err)
+
+	assert.Equal(t, "session=a b c; pair=x,y", req.Header.Get("Cookie"))
+}
+
 func TestFunctionURLRequest_ContextPropagation(t *testing.T) {
 	adapter := &FunctionURL{}
 	event := newTestFunctionURLRequest()
@@ -221,7 +234,8 @@ func TestFunctionURLResponse_TextBody(t *testing.T) {
 	recorder.WriteHeader(http.StatusOK)
 	recorder.Write([]byte("<h1>Hello</h1>"))
 
-	resp := adapter.Response(recorder)
+	resp, err := adapter.Response(recorder.Result())
+	require.NoError(t, err)
 
 	assert.Equal(t, 200, resp.StatusCode)
 	assert.Equal(t, "<h1>Hello</h1>", resp.Body)
@@ -235,7 +249,8 @@ func TestFunctionURLResponse_JSONBody(t *testing.T) {
 	recorder.WriteHeader(http.StatusOK)
 	recorder.Write([]byte(`{"ok":true}`))
 
-	resp := adapter.Response(recorder)
+	resp, err := adapter.Response(recorder.Result())
+	require.NoError(t, err)
 
 	assert.Equal(t, `{"ok":true}`, resp.Body)
 	assert.False(t, resp.IsBase64Encoded)
@@ -246,7 +261,8 @@ func TestFunctionURLResponse_ImplicitStatusOK(t *testing.T) {
 	recorder := httptest.NewRecorder()
 	recorder.Header().Set("Content-Type", "text/plain")
 
-	resp := adapter.Response(recorder)
+	resp, err := adapter.Response(recorder.Result())
+	require.NoError(t, err)
 
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
 	assert.False(t, resp.IsBase64Encoded)
@@ -260,7 +276,8 @@ func TestFunctionURLResponse_BinaryBody(t *testing.T) {
 	data := []byte{0x00, 0x01, 0x02, 0xFF}
 	recorder.Write(data)
 
-	resp := adapter.Response(recorder)
+	resp, err := adapter.Response(recorder.Result())
+	require.NoError(t, err)
 
 	assert.True(t, resp.IsBase64Encoded)
 	decoded, err := base64.StdEncoding.DecodeString(resp.Body)
@@ -268,15 +285,37 @@ func TestFunctionURLResponse_BinaryBody(t *testing.T) {
 	assert.Equal(t, data, decoded)
 }
 
-func TestFunctionURLResponse_NoContentType(t *testing.T) {
+func TestFunctionURLResponse_NoContentTypeSniffsText(t *testing.T) {
+	// Real net/http servers sniff a Content-Type on the first Write when the
+	// handler didn't set one; the adapter must do the same.
 	adapter := &FunctionURL{}
 	recorder := httptest.NewRecorder()
 	recorder.WriteHeader(http.StatusOK)
-	recorder.Write([]byte("unknown content"))
+	recorder.Write([]byte("plain text response"))
 
-	resp := adapter.Response(recorder)
+	resp, err := adapter.Response(recorder.Result())
+	require.NoError(t, err)
+
+	assert.False(t, resp.IsBase64Encoded)
+	assert.Equal(t, "plain text response", resp.Body)
+	assert.Equal(t, "text/plain; charset=utf-8", resp.Headers["content-type"])
+}
+
+func TestFunctionURLResponse_NoContentTypeSniffsBinary(t *testing.T) {
+	adapter := &FunctionURL{}
+	recorder := httptest.NewRecorder()
+	recorder.WriteHeader(http.StatusOK)
+	data := []byte{0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A}
+	recorder.Write(data)
+
+	resp, err := adapter.Response(recorder.Result())
+	require.NoError(t, err)
 
 	assert.True(t, resp.IsBase64Encoded)
+	decoded, err := base64.StdEncoding.DecodeString(resp.Body)
+	require.NoError(t, err)
+	assert.Equal(t, data, decoded)
+	assert.Equal(t, "image/png", resp.Headers["content-type"])
 }
 
 func TestFunctionURLResponse_Cookies(t *testing.T) {
@@ -288,7 +327,8 @@ func TestFunctionURLResponse_Cookies(t *testing.T) {
 	recorder.WriteHeader(http.StatusOK)
 	recorder.Write([]byte("ok"))
 
-	resp := adapter.Response(recorder)
+	resp, err := adapter.Response(recorder.Result())
+	require.NoError(t, err)
 
 	assert.Len(t, resp.Cookies, 2)
 	assert.Contains(t, resp.Cookies, "session=abc; HttpOnly")
@@ -306,7 +346,8 @@ func TestFunctionURLResponse_StatusCode(t *testing.T) {
 		recorder.Header().Set("Content-Type", "text/plain")
 		recorder.WriteHeader(code)
 
-		resp := adapter.Response(recorder)
+		resp, err := adapter.Response(recorder.Result())
+		require.NoError(t, err)
 		assert.Equal(t, code, resp.StatusCode)
 	}
 }
@@ -320,7 +361,8 @@ func TestFunctionURLResponse_MultiValueHeaders(t *testing.T) {
 	recorder.WriteHeader(http.StatusOK)
 	recorder.Write([]byte("ok"))
 
-	resp := adapter.Response(recorder)
+	resp, err := adapter.Response(recorder.Result())
+	require.NoError(t, err)
 
 	assert.Equal(t, "val1, val2", resp.Headers["x-custom"])
 }
