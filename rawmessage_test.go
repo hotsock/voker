@@ -39,7 +39,7 @@ func TestCallHandler_RawMessage_VerbatimPayload(t *testing.T) {
 
 	out, err := callHandler(context.Background(), payload, handler)
 	require.NoError(t, err)
-	assert.JSONEq(t, `"ok"`, string(out))
+	assert.JSONEq(t, `"ok"`, string(out.payload))
 	assert.Equal(t, string(payload), string(got))
 }
 
@@ -77,7 +77,7 @@ func TestCallHandler_RawMessage_InvalidJSONNotRejected(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, called, "handler should run even with non-JSON payload")
 	assert.Equal(t, string(payload), string(got))
-	assert.JSONEq(t, `"handled"`, string(out))
+	assert.JSONEq(t, `"handled"`, string(out.payload))
 }
 
 func TestCallHandler_RawMessage_EmptyPayload(t *testing.T) {
@@ -93,7 +93,7 @@ func TestCallHandler_RawMessage_EmptyPayload(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, called, "handler should run on an empty payload instead of erroring")
 	assert.Empty(t, got)
-	assert.JSONEq(t, `"ok"`, string(out))
+	assert.JSONEq(t, `"ok"`, string(out.payload))
 }
 
 func TestCallHandler_RawMessage_NilPayload(t *testing.T) {
@@ -122,7 +122,7 @@ func TestCallHandler_RawMessage_HandlerDecodesItself(t *testing.T) {
 
 	out, err := callHandler(context.Background(), payload, handler)
 	require.NoError(t, err)
-	assert.JSONEq(t, `{"message":"hello voker"}`, string(out))
+	assert.JSONEq(t, `{"message":"hello voker"}`, string(out.payload))
 }
 
 func TestCallHandler_RawMessage_PointerInputUnaffected(t *testing.T) {
@@ -168,7 +168,7 @@ func TestCallHandler_TypedInput_StillUnmarshals(t *testing.T) {
 
 	out, err := callHandler(context.Background(), payload, handler)
 	require.NoError(t, err)
-	assert.JSONEq(t, `{"message":"hi world"}`, string(out))
+	assert.JSONEq(t, `{"message":"hi world"}`, string(out.payload))
 }
 
 // TestHandleInvocation_RawMessage_EndToEnd exercises the bypass through the

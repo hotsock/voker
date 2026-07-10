@@ -3,6 +3,8 @@ package voker
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
@@ -26,6 +28,10 @@ const (
 
 	headerUserAgent   = "User-Agent"
 	headerContentType = "Content-Type"
+
+	headerResponseMode    = "Lambda-Runtime-Function-Response-Mode"
+	headerStreamErrorType = "Lambda-Runtime-Function-Error-Type"
+	headerStreamErrorBody = "Lambda-Runtime-Function-Error-Body"
 )
 
 var userAgent = fmt.Sprintf("voker/%s go/%s", vokerVersion, runtime.Version())
@@ -104,6 +110,96 @@ const responsePath = "/response"
 func (inv *invocation) success(responsePayload []byte) error {
 	url := inv.client.baseURL + inv.requestID + responsePath
 	return inv.client.post(context.Background(), url, responsePayload)
+}
+
+func (inv *invocation) successStreaming(ctx context.Context, reader io.Reader, contentType string) (streamErr error, responseErr error) {
+	body := &streamingRequestBody{reader: reader}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, inv.client.baseURL+inv.requestID+responsePath, body)
+	if err != nil {
+		return nil, err
+	}
+
+	if contentType == "" {
+		contentType = "application/octet-stream"
+	}
+	req.Header.Set(headerContentType, contentType)
+	req.Header.Set(headerUserAgent, userAgent)
+	req.Header.Set(headerResponseMode, "streaming")
+	req.TransferEncoding = []string{"chunked"}
+	req.Trailer = http.Header{
+		headerStreamErrorType: nil,
+		headerStreamErrorBody: nil,
+	}
+	body.trailer = req.Trailer
+	// Lambda requires the runtime to close the response connection after a
+	// streaming invocation instead of returning it to the transport pool.
+	req.Close = true
+
+	resp, err := inv.client.httpClient.Do(req)
+	if err != nil {
+		return body.streamErr, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusAccepted {
+		return body.streamErr, fmt.Errorf("unexpected status code from runtime API: %d", resp.StatusCode)
+	}
+	if _, err := io.Copy(io.Discard, resp.Body); err != nil {
+		return body.streamErr, err
+	}
+	return body.streamErr, nil
+}
+
+type streamingRequestBody struct {
+	reader     io.Reader
+	trailer    http.Header
+	streamErr  error
+	pendingEOF bool
+}
+
+func (b *streamingRequestBody) Read(p []byte) (n int, err error) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			n = 0
+			err = io.EOF
+			b.setError(newPanicResponse(recovered))
+		}
+	}()
+	if b.pendingEOF {
+		return 0, io.EOF
+	}
+
+	n, err = b.reader.Read(p)
+	if err == nil || err == io.EOF {
+		return n, err
+	}
+
+	b.setError(err)
+	if n > 0 {
+		b.pendingEOF = true
+		return n, nil
+	}
+	return 0, io.EOF
+}
+
+func (b *streamingRequestBody) Close() error {
+	if closer, ok := b.reader.(io.Closer); ok {
+		return closer.Close()
+	}
+	return nil
+}
+
+func (b *streamingRequestBody) setError(err error) {
+	b.streamErr = err
+	errorResponse := newErrorResponse(err)
+	if typed, ok := err.(*ErrorResponse); ok {
+		errorResponse = typed
+	}
+	errorJSON, marshalErr := json.Marshal(errorResponse)
+	if marshalErr != nil {
+		errorJSON = fmt.Appendf(nil, `{"errorMessage":"failed to marshal streaming error: %s","errorType":"Runtime.MarshalError"}`, marshalErr)
+	}
+	b.trailer.Set(headerStreamErrorType, errorResponse.Type)
+	b.trailer.Set(headerStreamErrorBody, base64.StdEncoding.EncodeToString(errorJSON))
 }
 
 const errorPath = "/error"

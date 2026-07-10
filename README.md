@@ -112,7 +112,7 @@ Where:
 
 - `context.Context` is required (provides deadline, cancellation, Lambda metadata)
 - `TIn` is your input type (must be JSON-deserializable)
-- `TOut` is your output type (must be JSON-serializable)
+- `TOut` is your output type (JSON-serializable, or an `io.Reader` for streaming)
 - `error` is required for error handling
 
 ### Raw payloads
@@ -137,6 +137,46 @@ This is useful for handlers that work with large payloads and want to measure
 or control their own decoding rather than paying for an unmarshal up front.
 Because validation is skipped, the handler also sees empty or malformed
 payloads as-is instead of voker rejecting them.
+
+### Response streaming
+
+Return an `io.Reader` to stream bytes through the Lambda Runtime API instead of
+JSON-encoding the response. If the returned value also implements
+`ContentType() string`, voker propagates that content type; otherwise it uses
+`application/octet-stream`.
+
+```go
+func handler(ctx context.Context, event MyEvent) (io.Reader, error) {
+    reader, writer := io.Pipe()
+    go func() {
+        defer writer.Close()
+        _, _ = io.WriteString(writer, "first\n")
+        time.Sleep(time.Second)
+        _, _ = io.WriteString(writer, "second\n")
+    }()
+    return reader, nil
+}
+```
+
+For `net/http` handlers, use `vokerhttp.StartHTTPStreaming`. Its response
+writer implements `http.Flusher` and preserves HTTP status, headers, repeated
+headers, and cookies in Lambda's streaming metadata prelude.
+
+```go
+vokerhttp.StartHTTPStreaming(mux, &vokerhttp.FunctionURL{})
+vokerhttp.StartHTTPStreaming(mux, &vokerhttp.APIGatewayV1{})
+```
+
+| Ingress                   | Buffered |                            Streaming |
+| ------------------------- | -------: | -----------------------------------: |
+| Lambda Function URL       |      Yes |              Yes (`RESPONSE_STREAM`) |
+| API Gateway v1 REST API   |      Yes | Yes (`ResponseTransferMode: STREAM`) |
+| API Gateway v2 HTTP API   |      Yes |                                   No |
+| Application Load Balancer |      Yes |                                   No |
+
+Streaming REST integrations must also use API Gateway's
+`response-streaming-invocations` integration URI. See the complete deployable
+matrix in [`examples/aws-ingress-probe`](examples/aws-ingress-probe/README.md).
 
 ## Lambda Context
 
@@ -186,21 +226,30 @@ func main() {
 Lambda metadata (function name, version, and the request ID from the invocation
 context). Options override the environment values:
 
-| Option | Description |
-|---|---|
-| `WithJSON()` | Output in JSON format |
-| `WithText()` | Output in text format |
-| `WithLevel(slog.Leveler)` | Set the minimum log level |
-| `WithSource()` | Include source file, function, and line number |
-| `WithType(string)` | Set the `type` field (default: `"app.log"`) |
-| `WithoutTime()` | Omit the timestamp |
+| Option                    | Description                                    |
+| ------------------------- | ---------------------------------------------- |
+| `WithJSON()`              | Output in JSON format                          |
+| `WithText()`              | Output in text format                          |
+| `WithLevel(slog.Leveler)` | Set the minimum log level                      |
+| `WithSource()`            | Include source file, function, and line number |
+| `WithType(string)`        | Set the `type` field (default: `"app.log"`)    |
+| `WithoutTime()`           | Omit the timestamp                             |
 
 In addition to the standard slog levels, the handler maps Lambda's `TRACE`
 (`slog.LevelDebug - 4`) and `FATAL` (`slog.LevelError + 4`) levels. A JSON record
 looks like:
 
 ```json
-{"level":"INFO","msg":"Lambda Invoked","record":{"functionName":"my-func","version":"$LATEST","requestId":"abc-123"},"type":"app.log"}
+{
+  "level": "INFO",
+  "msg": "Lambda Invoked",
+  "record": {
+    "functionName": "my-func",
+    "version": "$LATEST",
+    "requestId": "abc-123"
+  },
+  "type": "app.log"
+}
 ```
 
 ### The `type` field
