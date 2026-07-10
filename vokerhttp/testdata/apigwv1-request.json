@@ -40,7 +40,7 @@
     "redirect": ["https://example.com/a/b"],
     "repeat": ["one", "two"]
   },
-  "pathParameters": {"proxy": "capture/space%20value"},
+  "pathParameters": { "proxy": "capture/space%20value" },
   "stageVariables": null,
   "requestContext": {
     "accountId": "910345601053",
@@ -70,7 +70,7 @@
         "subjectDN": "",
         "issuerDN": "",
         "serialNumber": "",
-        "validity": {"notBefore": "", "notAfter": ""}
+        "validity": { "notBefore": "", "notAfter": "" }
       }
     },
     "operationName": "",

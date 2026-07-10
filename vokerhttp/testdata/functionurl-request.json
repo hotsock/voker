@@ -37,16 +37,20 @@
         "subjectDN": "",
         "issuerDN": "",
         "serialNumber": "",
-        "validity": {"notBefore": "", "notAfter": ""}
+        "validity": { "notBefore": "", "notAfter": "" }
       }
     },
     "authorizer": {
-      "jwt": {"claims": null, "scopes": null},
+      "jwt": { "claims": null, "scopes": null },
       "iam": {
         "accessKey": "",
         "accountId": "",
         "callerId": "",
-        "cognitoIdentity": {"amr": null, "identityId": "", "identityPoolId": ""},
+        "cognitoIdentity": {
+          "amr": null,
+          "identityId": "",
+          "identityPoolId": ""
+        },
         "principalOrgId": "",
         "userArn": "",
         "userId": ""

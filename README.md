@@ -167,12 +167,12 @@ vokerhttp.StartHTTPStreaming(mux, &vokerhttp.FunctionURL{})
 vokerhttp.StartHTTPStreaming(mux, &vokerhttp.APIGatewayV1{})
 ```
 
-| Ingress | Buffered | Streaming |
-|---|---:|---:|
-| Lambda Function URL | Yes | Yes (`RESPONSE_STREAM`) |
-| API Gateway v1 REST API | Yes | Yes (`ResponseTransferMode: STREAM`) |
-| API Gateway v2 HTTP API | Yes | No |
-| Application Load Balancer | Yes | No |
+| Ingress                   | Buffered |                            Streaming |
+| ------------------------- | -------: | -----------------------------------: |
+| Lambda Function URL       |      Yes |              Yes (`RESPONSE_STREAM`) |
+| API Gateway v1 REST API   |      Yes | Yes (`ResponseTransferMode: STREAM`) |
+| API Gateway v2 HTTP API   |      Yes |                                   No |
+| Application Load Balancer |      Yes |                                   No |
 
 Streaming REST integrations must also use API Gateway's
 `response-streaming-invocations` integration URI. See the complete deployable
@@ -226,21 +226,30 @@ func main() {
 Lambda metadata (function name, version, and the request ID from the invocation
 context). Options override the environment values:
 
-| Option | Description |
-|---|---|
-| `WithJSON()` | Output in JSON format |
-| `WithText()` | Output in text format |
-| `WithLevel(slog.Leveler)` | Set the minimum log level |
-| `WithSource()` | Include source file, function, and line number |
-| `WithType(string)` | Set the `type` field (default: `"app.log"`) |
-| `WithoutTime()` | Omit the timestamp |
+| Option                    | Description                                    |
+| ------------------------- | ---------------------------------------------- |
+| `WithJSON()`              | Output in JSON format                          |
+| `WithText()`              | Output in text format                          |
+| `WithLevel(slog.Leveler)` | Set the minimum log level                      |
+| `WithSource()`            | Include source file, function, and line number |
+| `WithType(string)`        | Set the `type` field (default: `"app.log"`)    |
+| `WithoutTime()`           | Omit the timestamp                             |
 
 In addition to the standard slog levels, the handler maps Lambda's `TRACE`
 (`slog.LevelDebug - 4`) and `FATAL` (`slog.LevelError + 4`) levels. A JSON record
 looks like:
 
 ```json
-{"level":"INFO","msg":"Lambda Invoked","record":{"functionName":"my-func","version":"$LATEST","requestId":"abc-123"},"type":"app.log"}
+{
+  "level": "INFO",
+  "msg": "Lambda Invoked",
+  "record": {
+    "functionName": "my-func",
+    "version": "$LATEST",
+    "requestId": "abc-123"
+  },
+  "type": "app.log"
+}
 ```
 
 ### The `type` field

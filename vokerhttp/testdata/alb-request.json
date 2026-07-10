@@ -20,7 +20,9 @@
     "content-length": ["66"],
     "content-type": ["application/json"],
     "cookie": ["session=abc123; theme=dark"],
-    "host": ["vokerhtt-ALB-4XF8jCVDRJg4-1316758055.us-west-2.elb.amazonaws.com"],
+    "host": [
+      "vokerhtt-ALB-4XF8jCVDRJg4-1316758055.us-west-2.elb.amazonaws.com"
+    ],
     "user-agent": ["curl/8.7.1"],
     "x-amzn-trace-id": ["Root=1-6a5145a7-5c3686ff7df3149177a89157"],
     "x-forwarded-for": ["68.8.83.18"],
