@@ -19,6 +19,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"os/signal"
@@ -69,7 +70,15 @@ func WithTraceID(enabled bool) Option {
 //
 //	func(context.Context, TIn) (TOut, error)
 //
-// Where TIn and TOut are JSON-serializable types.
+// Where TIn is JSON-deserializable. TOut is normally JSON-serializable. When
+// TOut implements io.Reader, voker instead streams it through the Lambda
+// Runtime API. A streaming response can optionally implement this interface
+// to control the content type propagated by Lambda:
+//
+//	type contentTypeResponse interface {
+//	    io.Reader
+//	    ContentType() string
+//	}
 //
 // As a special case, a handler may declare TIn as json.RawMessage to receive
 // the invocation payload verbatim. voker skips unmarshaling (and JSON
@@ -83,6 +92,12 @@ func WithTraceID(enabled bool) Option {
 //
 // This function blocks indefinitely and only returns if a fatal error occurs.
 func Start[TIn, TOut any](handler func(context.Context, TIn) (TOut, error), opts ...Option) {
+	start(func(client *runtimeClient, options *options) error {
+		return handleInvocation(client, handler, options)
+	}, opts...)
+}
+
+func start(handle func(*runtimeClient, *options) error, opts ...Option) {
 	options := &options{}
 	for _, opt := range opts {
 		opt(options)
@@ -123,7 +138,7 @@ func Start[TIn, TOut any](handler func(context.Context, TIn) (TOut, error), opts
 		case <-done:
 			return
 		default:
-			if err := handleInvocation(client, handler, options); err != nil {
+			if err := handle(client, options); err != nil {
 				// Don't log panics here - they're already logged in sendError
 				if !errors.Is(err, errHandlerPanicked) {
 					options.logger.Error("fatal invocation loop error", "error", err)
@@ -178,17 +193,31 @@ func handleInvocation[TIn, TOut any](client *runtimeClient, handler func(context
 		return sendError(ctx, inv, err, options.logger)
 	}
 
-	if err := inv.success(response); err != nil {
+	if response.stream != nil {
+		streamErr, err := inv.successStreaming(ctx, response.stream, response.contentType)
+		if err != nil {
+			return fmt.Errorf("failed to send streaming response: %w", err)
+		}
+		if streamErr != nil {
+			options.logger.ErrorContext(ctx, "streaming invocation error", "error", streamErr)
+		}
+	} else if err := inv.success(response.payload); err != nil {
 		return fmt.Errorf("failed to send success response: %w", err)
 	}
 
 	return nil
 }
 
-func callHandler[TIn, TOut any](ctx context.Context, payload []byte, handler func(context.Context, TIn) (TOut, error)) (responseBytes []byte, responseErr error) {
+type handlerResponse struct {
+	payload     []byte
+	stream      io.Reader
+	contentType string
+}
+
+func callHandler[TIn, TOut any](ctx context.Context, payload []byte, handler func(context.Context, TIn) (TOut, error)) (response handlerResponse, responseErr error) {
 	defer func() {
 		if r := recover(); r != nil {
-			responseBytes = nil
+			response = handlerResponse{}
 			responseErr = newPanicResponse(r)
 		}
 	}()
@@ -210,7 +239,7 @@ func callHandler[TIn, TOut any](ctx context.Context, payload []byte, handler fun
 	if raw, ok := any(&input).(*json.RawMessage); ok {
 		*raw = payload
 	} else if err := json.Unmarshal(payload, &input); err != nil {
-		return nil, &ErrorResponse{
+		return handlerResponse{}, &ErrorResponse{
 			Message: fmt.Sprintf("failed to unmarshal input: %v", err),
 			Type:    "Runtime.UnmarshalError",
 		}
@@ -218,18 +247,26 @@ func callHandler[TIn, TOut any](ctx context.Context, payload []byte, handler fun
 
 	output, err := handler(ctx, input)
 	if err != nil {
-		return nil, newErrorResponse(err)
+		return handlerResponse{}, newErrorResponse(err)
 	}
 
-	responseBytes, err = json.Marshal(output)
+	if stream, ok := any(output).(io.Reader); ok {
+		contentType := "application/octet-stream"
+		if typed, ok := any(output).(interface{ ContentType() string }); ok {
+			contentType = typed.ContentType()
+		}
+		return handlerResponse{stream: stream, contentType: contentType}, nil
+	}
+
+	responseBytes, err := json.Marshal(output)
 	if err != nil {
-		return nil, &ErrorResponse{
+		return handlerResponse{}, &ErrorResponse{
 			Message: fmt.Sprintf("failed to marshal output: %v", err),
 			Type:    "Runtime.MarshalError",
 		}
 	}
 
-	return responseBytes, nil
+	return handlerResponse{payload: responseBytes}, nil
 }
 
 func sendError(ctx context.Context, inv *invocation, err error, logger *slog.Logger) error {

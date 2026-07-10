@@ -150,3 +150,17 @@ func (a *APIGatewayV1) Response(resp *http.Response) (APIGatewayV1Response, erro
 
 	return out, nil
 }
+
+// StreamingResponseMetadata converts HTTP status and headers into the Lambda
+// streaming integration prelude used by API Gateway REST APIs.
+func (a *APIGatewayV1) StreamingResponseMetadata(statusCode int, header http.Header) StreamingResponseMetadata {
+	out := StreamingResponseMetadata{StatusCode: statusCode}
+	multiHeaders := make(map[string][]string)
+	for k, values := range header {
+		multiHeaders[strings.ToLower(k)] = append([]string(nil), values...)
+	}
+	if len(multiHeaders) > 0 {
+		out.MultiValueHeaders = multiHeaders
+	}
+	return out
+}

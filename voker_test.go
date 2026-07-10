@@ -4,10 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -65,6 +67,54 @@ func TestHandleInvocation_Success(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, invocationReceived)
 	assert.True(t, responseReceived)
+}
+
+func TestHandleInvocation_Streaming(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/2018-06-01/runtime/invocation/next":
+			w.Header().Set(headerRequestID, "stream-request-id")
+			w.Header().Set(headerDeadlineMS, "999999999999999")
+			w.WriteHeader(http.StatusOK)
+			_ = json.NewEncoder(w).Encode(testEvent{Name: "stream"})
+		case "/2018-06-01/runtime/invocation/stream-request-id/response":
+			assert.Equal(t, "streaming", r.Header.Get(headerResponseMode))
+			assert.Equal(t, "application/octet-stream", r.Header.Get(headerContentType))
+			body, err := io.ReadAll(r.Body)
+			require.NoError(t, err)
+			assert.Equal(t, "hello stream", string(body))
+			w.WriteHeader(http.StatusAccepted)
+		}
+	}))
+	defer server.Close()
+
+	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
+	client := newRuntimeClient(server.URL[7:], logger)
+	handler := func(_ context.Context, event testEvent) (io.Reader, error) {
+		return strings.NewReader("hello " + event.Name), nil
+	}
+
+	require.NoError(t, handleInvocation(client, handler, &options{logger: logger}))
+}
+
+type contentTypeReader struct {
+	io.Reader
+}
+
+func (contentTypeReader) ContentType() string { return "text/event-stream" }
+
+func TestCallHandler_StreamingContentType(t *testing.T) {
+	handler := func(context.Context, testEvent) (contentTypeReader, error) {
+		return contentTypeReader{Reader: strings.NewReader("event")}, nil
+	}
+
+	response, err := callHandler(context.Background(), []byte(`{"name":"test"}`), handler)
+	require.NoError(t, err)
+	assert.Nil(t, response.payload)
+	assert.Equal(t, "text/event-stream", response.contentType)
+	body, err := io.ReadAll(response.stream)
+	require.NoError(t, err)
+	assert.Equal(t, "event", string(body))
 }
 
 func TestHandleInvocation_HandlerError(t *testing.T) {

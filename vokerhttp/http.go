@@ -43,6 +43,15 @@ type Adapter[E, R any] interface {
 	Response(resp *http.Response) (R, error)
 }
 
+// StreamingAdapter converts a Lambda event into an HTTP request and HTTP
+// response metadata into the streaming Lambda integration format.
+// [FunctionURL] and [APIGatewayV1] implement StreamingAdapter. API Gateway v2
+// HTTP APIs and ALB Lambda targets do not support response streaming.
+type StreamingAdapter[E any] interface {
+	Request(ctx context.Context, event E) (*http.Request, error)
+	StreamingResponseMetadata(statusCode int, header http.Header) StreamingResponseMetadata
+}
+
 // StartHTTP starts the Lambda runtime loop with a standard http.Handler
 // and an Adapter that handles event format conversion.
 //
@@ -59,6 +68,23 @@ type Adapter[E, R any] interface {
 //	vokerhttp.StartHTTP(mux, &vokerhttp.APIGatewayV2{}, voker.WithLogger(logger))
 func StartHTTP[E, R any](handler http.Handler, adapter Adapter[E, R], opts ...voker.Option) {
 	voker.Start(eventHandler(handler, adapter), opts...)
+}
+
+// StartHTTPStreaming starts the Lambda runtime loop with a standard
+// http.Handler and streams handler writes to Lambda as they occur. The
+// ResponseWriter passed to the handler implements [http.Flusher].
+//
+// The AWS integration must also be configured for streaming: Function URLs
+// require RESPONSE_STREAM invoke mode, while API Gateway v1 REST API Lambda
+// proxy integrations require STREAM response transfer mode and the response
+// streaming invocation URI.
+//
+// Usage:
+//
+//	vokerhttp.StartHTTPStreaming(mux, &vokerhttp.FunctionURL{})
+//	vokerhttp.StartHTTPStreaming(mux, &vokerhttp.APIGatewayV1{})
+func StartHTTPStreaming[E any](handler http.Handler, adapter StreamingAdapter[E], opts ...voker.Option) {
+	voker.Start(streamingEventHandler(handler, adapter), opts...)
 }
 
 // eventHandler builds the typed Lambda handler that StartHTTP passes to
@@ -85,6 +111,50 @@ func eventHandler[E, R any](handler http.Handler, adapter Adapter[E, R]) func(co
 		}
 
 		return response, nil
+	}
+}
+
+func streamingEventHandler[E any](handler http.Handler, adapter StreamingAdapter[E]) func(context.Context, E) (io.Reader, error) {
+	return func(ctx context.Context, event E) (io.Reader, error) {
+		req, err := adapter.Request(ctx, event)
+		if err != nil {
+			return nil, fmt.Errorf("failed to build http request: %w", err)
+		}
+
+		req = req.WithContext(context.WithValue(req.Context(), eventContextKey{}, event))
+
+		reader, writer := io.Pipe()
+		responseWriter := newStreamingResponseWriter(writer, adapter.StreamingResponseMetadata)
+		handlerResult := make(chan error, 1)
+		go func() {
+			var responseErr error
+			defer func() {
+				if recovered := recover(); recovered != nil {
+					responseErr = fmt.Errorf("http handler panicked: %v", recovered)
+				}
+				_ = writer.CloseWithError(responseErr)
+				handlerResult <- responseErr
+			}()
+
+			handler.ServeHTTP(responseWriter, req)
+			responseErr = responseWriter.finish()
+		}()
+
+		select {
+		case responseErr := <-handlerResult:
+			return nil, responseErr
+		case <-responseWriter.ready:
+			// A metadata marshal or destination error can commit and finish before
+			// the reader is returned. Prefer that error when it is already known.
+			select {
+			case responseErr := <-handlerResult:
+				if responseErr != nil {
+					return nil, responseErr
+				}
+			default:
+			}
+			return streamingHTTPResponse{PipeReader: reader}, nil
+		}
 	}
 }
 

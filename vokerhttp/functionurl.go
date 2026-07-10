@@ -25,6 +25,24 @@ func (a *FunctionURL) Response(resp *http.Response) (FunctionURLResponse, error)
 	return FunctionURLResponse(out), err
 }
 
+// StreamingResponseMetadata converts HTTP status and headers into the Lambda
+// streaming integration prelude used by Function URLs.
+func (a *FunctionURL) StreamingResponseMetadata(statusCode int, header http.Header) StreamingResponseMetadata {
+	out := StreamingResponseMetadata{StatusCode: statusCode}
+	headers := make(map[string]string)
+	for k, values := range header {
+		if strings.EqualFold(k, "Set-Cookie") {
+			out.Cookies = append(out.Cookies, values...)
+			continue
+		}
+		headers[strings.ToLower(k)] = strings.Join(values, ", ")
+	}
+	if len(headers) > 0 {
+		out.Headers = headers
+	}
+	return out
+}
+
 // FunctionURLRequest is the Lambda Function URL event (payload format 2.0).
 type FunctionURLRequest payloadV2Request
 

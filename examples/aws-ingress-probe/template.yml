@@ -47,6 +47,15 @@ Resources:
       CodeUri: ./bin/function.zip
       Role: !GetAtt ProbeRole.Arn
       Environment: {Variables: {VOKER_ADAPTER: apigwv1}}
+  APIGatewayV1StreamingFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ./bin/function.zip
+      Role: !GetAtt ProbeRole.Arn
+      Environment:
+        Variables:
+          VOKER_ADAPTER: apigwv1
+          VOKER_STREAMING: "true"
   APIGatewayV2Function:
     Type: AWS::Serverless::Function
     Properties:
@@ -59,6 +68,15 @@ Resources:
       CodeUri: ./bin/function.zip
       Role: !GetAtt ProbeRole.Arn
       Environment: {Variables: {VOKER_ADAPTER: functionurl}}
+  FunctionURLStreamingFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ./bin/function.zip
+      Role: !GetAtt ProbeRole.Arn
+      Environment:
+        Variables:
+          VOKER_ADAPTER: functionurl
+          VOKER_STREAMING: "true"
 
   ALBLogGroup:
     Type: AWS::Logs::LogGroup
@@ -70,6 +88,11 @@ Resources:
     Properties:
       LogGroupName: !Sub /aws/lambda/${APIGatewayV1Function}
       RetentionInDays: 1
+  APIGatewayV1StreamingLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/${APIGatewayV1StreamingFunction}
+      RetentionInDays: 1
   APIGatewayV2LogGroup:
     Type: AWS::Logs::LogGroup
     Properties:
@@ -80,11 +103,17 @@ Resources:
     Properties:
       LogGroupName: !Sub /aws/lambda/${FunctionURLFunction}
       RetentionInDays: 1
+  FunctionURLStreamingLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/${FunctionURLStreamingFunction}
+      RetentionInDays: 1
 
   FunctionURL:
     Type: AWS::Lambda::Url
     Properties:
       AuthType: NONE
+      InvokeMode: BUFFERED
       TargetFunctionArn: !GetAtt FunctionURLFunction.Arn
   FunctionURLPublicInvokeURL:
     Type: AWS::Lambda::Permission
@@ -101,12 +130,33 @@ Resources:
       InvokedViaFunctionUrl: true
       Principal: "*"
 
+  FunctionURLStreaming:
+    Type: AWS::Lambda::Url
+    Properties:
+      AuthType: NONE
+      InvokeMode: RESPONSE_STREAM
+      TargetFunctionArn: !GetAtt FunctionURLStreamingFunction.Arn
+  FunctionURLStreamingPublicInvokeURL:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunctionUrl
+      FunctionName: !Ref FunctionURLStreamingFunction
+      FunctionUrlAuthType: NONE
+      Principal: "*"
+  FunctionURLStreamingPublicInvokeFunction:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref FunctionURLStreamingFunction
+      InvokedViaFunctionUrl: true
+      Principal: "*"
+
   RestAPI:
     Type: AWS::ApiGateway::RestApi
     Properties:
       BinaryMediaTypes: ["*/*"]
       EndpointConfiguration: {Types: [REGIONAL]}
-      Name: !Sub ${AWS::StackName}-rest
+      Name: !Sub ${AWS::StackName}-rest-buffered
   RestProxyResource:
     Type: AWS::ApiGateway::Resource
     Properties:
@@ -122,6 +172,7 @@ Resources:
       RestApiId: !Ref RestAPI
       Integration:
         IntegrationHttpMethod: POST
+        ResponseTransferMode: BUFFERED
         Type: AWS_PROXY
         Uri: !Sub arn:${AWS::Partition}:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${APIGatewayV1Function.Arn}/invocations
   RestProxyMethod:
@@ -133,12 +184,14 @@ Resources:
       RestApiId: !Ref RestAPI
       Integration:
         IntegrationHttpMethod: POST
+        ResponseTransferMode: BUFFERED
         Type: AWS_PROXY
         Uri: !Sub arn:${AWS::Partition}:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${APIGatewayV1Function.Arn}/invocations
-  RestDeployment:
+  RestBufferedDeployment:
     Type: AWS::ApiGateway::Deployment
     DependsOn: [RestRootMethod, RestProxyMethod]
     Properties:
+      Description: Buffered Lambda proxy integration
       RestApiId: !Ref RestAPI
       StageName: live
   RestInvokePermission:
@@ -148,6 +201,56 @@ Resources:
       FunctionName: !Ref APIGatewayV1Function
       Principal: apigateway.amazonaws.com
       SourceArn: !Sub arn:${AWS::Partition}:execute-api:${AWS::Region}:${AWS::AccountId}:${RestAPI}/*/*/*
+
+  RestStreamingAPI:
+    Type: AWS::ApiGateway::RestApi
+    Properties:
+      EndpointConfiguration: {Types: [REGIONAL]}
+      Name: !Sub ${AWS::StackName}-rest-streaming
+  RestStreamingProxyResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      ParentId: !GetAtt RestStreamingAPI.RootResourceId
+      PathPart: "{proxy+}"
+      RestApiId: !Ref RestStreamingAPI
+  RestStreamingRootMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      AuthorizationType: NONE
+      HttpMethod: ANY
+      ResourceId: !GetAtt RestStreamingAPI.RootResourceId
+      RestApiId: !Ref RestStreamingAPI
+      Integration:
+        IntegrationHttpMethod: POST
+        ResponseTransferMode: STREAM
+        Type: AWS_PROXY
+        Uri: !Sub arn:${AWS::Partition}:apigateway:${AWS::Region}:lambda:path/2021-11-15/functions/${APIGatewayV1StreamingFunction.Arn}/response-streaming-invocations
+  RestStreamingProxyMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      AuthorizationType: NONE
+      HttpMethod: ANY
+      ResourceId: !Ref RestStreamingProxyResource
+      RestApiId: !Ref RestStreamingAPI
+      Integration:
+        IntegrationHttpMethod: POST
+        ResponseTransferMode: STREAM
+        Type: AWS_PROXY
+        Uri: !Sub arn:${AWS::Partition}:apigateway:${AWS::Region}:lambda:path/2021-11-15/functions/${APIGatewayV1StreamingFunction.Arn}/response-streaming-invocations
+  RestStreamingDeployment:
+    Type: AWS::ApiGateway::Deployment
+    DependsOn: [RestStreamingRootMethod, RestStreamingProxyMethod]
+    Properties:
+      Description: Streaming Lambda proxy integration
+      RestApiId: !Ref RestStreamingAPI
+      StageName: live
+  RestStreamingInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref APIGatewayV1StreamingFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub arn:${AWS::Partition}:execute-api:${AWS::Region}:${AWS::AccountId}:${RestStreamingAPI}/*/*/*
 
   HTTPAPI:
     Type: AWS::ApiGatewayV2::Api
@@ -226,11 +329,15 @@ Resources:
       Protocol: HTTP
 
 Outputs:
-  ALBURL:
+  ALBBufferedEndpoint:
     Value: !Sub http://${ALB.DNSName}
-  APIGatewayV1URL:
+  APIGatewayV1BufferedEndpoint:
     Value: !Sub https://${RestAPI}.execute-api.${AWS::Region}.${AWS::URLSuffix}/live
-  APIGatewayV2URL:
+  APIGatewayV1StreamingEndpoint:
+    Value: !Sub https://${RestStreamingAPI}.execute-api.${AWS::Region}.${AWS::URLSuffix}/live
+  APIGatewayV2BufferedEndpoint:
     Value: !GetAtt HTTPAPI.ApiEndpoint
-  FunctionURL:
+  FunctionURLBufferedEndpoint:
     Value: !GetAtt FunctionURL.FunctionUrl
+  FunctionURLStreamingEndpoint:
+    Value: !GetAtt FunctionURLStreaming.FunctionUrl

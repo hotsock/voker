@@ -8,6 +8,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"time"
 
 	"github.com/hotsock/voker"
 	"github.com/hotsock/voker/vokerhttp"
@@ -64,6 +65,20 @@ func probeHandler(adapter string) http.Handler {
 		http.SetCookie(w, &http.Cookie{Name: "voker_b", Value: "two", Path: "/", SameSite: http.SameSiteLaxMode})
 
 		switch r.URL.Path {
+		case "/stream":
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.Header().Set("Cache-Control", "no-cache")
+			flusher, ok := w.(http.Flusher)
+			if !ok {
+				http.Error(w, "streaming unsupported", http.StatusInternalServerError)
+				return
+			}
+			for _, chunk := range []string{"data: first\n\n", "data: second\n\n", "data: third\n\n"} {
+				_, _ = io.WriteString(w, chunk)
+				flusher.Flush()
+				time.Sleep(750 * time.Millisecond)
+			}
+			return
 		case "/binary":
 			w.Header().Set("Content-Type", "application/octet-stream")
 			w.WriteHeader(http.StatusOK)
@@ -103,17 +118,26 @@ func probeHandler(adapter string) http.Handler {
 
 func main() {
 	adapter := os.Getenv("VOKER_ADAPTER")
+	streaming := os.Getenv("VOKER_STREAMING") == "true"
 	handler := probeHandler(adapter)
 
 	switch adapter {
 	case "alb":
 		vokerhttp.StartHTTP(handler, &vokerhttp.ALB{MultiValueHeaders: true})
 	case "apigwv1":
-		vokerhttp.StartHTTP(handler, &vokerhttp.APIGatewayV1{})
+		if streaming {
+			vokerhttp.StartHTTPStreaming(handler, &vokerhttp.APIGatewayV1{})
+		} else {
+			vokerhttp.StartHTTP(handler, &vokerhttp.APIGatewayV1{})
+		}
 	case "apigwv2":
 		vokerhttp.StartHTTP(handler, &vokerhttp.APIGatewayV2{})
 	case "functionurl":
-		vokerhttp.StartHTTP(handler, &vokerhttp.FunctionURL{})
+		if streaming {
+			vokerhttp.StartHTTPStreaming(handler, &vokerhttp.FunctionURL{})
+		} else {
+			vokerhttp.StartHTTP(handler, &vokerhttp.FunctionURL{})
+		}
 	default:
 		panic(fmt.Sprintf("unknown VOKER_ADAPTER %q", adapter))
 	}

@@ -2,7 +2,9 @@ package voker
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -87,6 +89,120 @@ func TestInvocation_Success(t *testing.T) {
 	err := inv.success(responsePayload)
 	require.NoError(t, err)
 	assert.True(t, responseReceived)
+}
+
+func TestInvocation_SuccessStreaming(t *testing.T) {
+	firstChunkReceived := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, "/2018-06-01/runtime/invocation/req-stream/response", r.URL.Path)
+		assert.Equal(t, "streaming", r.Header.Get(headerResponseMode))
+		assert.Equal(t, "text/event-stream", r.Header.Get(headerContentType))
+		assert.Equal(t, []string{"chunked"}, r.TransferEncoding)
+
+		first := make([]byte, len("first"))
+		_, err := io.ReadFull(r.Body, first)
+		require.NoError(t, err)
+		assert.Equal(t, "first", string(first))
+		close(firstChunkReceived)
+
+		rest, err := io.ReadAll(r.Body)
+		require.NoError(t, err)
+		assert.Equal(t, "second", string(rest))
+		assert.Empty(t, r.Trailer.Get(headerStreamErrorType))
+		w.WriteHeader(http.StatusAccepted)
+	}))
+	defer server.Close()
+
+	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
+	client := newRuntimeClient(server.URL[7:], logger)
+	inv := &invocation{requestID: "req-stream", client: client}
+
+	reader, writer := io.Pipe()
+	producerResult := make(chan error, 1)
+	go func() {
+		if _, err := io.WriteString(writer, "first"); err != nil {
+			producerResult <- err
+			return
+		}
+		<-firstChunkReceived
+		_, err := io.WriteString(writer, "second")
+		if closeErr := writer.Close(); err == nil {
+			err = closeErr
+		}
+		producerResult <- err
+	}()
+
+	streamErr, err := inv.successStreaming(context.Background(), reader, "text/event-stream")
+	require.NoError(t, err)
+	require.NoError(t, streamErr)
+	require.NoError(t, <-producerResult)
+}
+
+func TestInvocation_StreamingErrorTrailers(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		require.NoError(t, err)
+		assert.Equal(t, "partial", string(body))
+		assert.Equal(t, "Runtime.HandlerError", r.Trailer.Get(headerStreamErrorType))
+
+		encoded := r.Trailer.Get(headerStreamErrorBody)
+		decoded, err := base64.StdEncoding.DecodeString(encoded)
+		require.NoError(t, err)
+		var got ErrorResponse
+		require.NoError(t, json.Unmarshal(decoded, &got))
+		assert.Equal(t, "stream failed", got.Message)
+		w.WriteHeader(http.StatusAccepted)
+	}))
+	defer server.Close()
+
+	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
+	client := newRuntimeClient(server.URL[7:], logger)
+	inv := &invocation{requestID: "req-stream-error", client: client}
+	wantErr := errors.New("stream failed")
+
+	streamErr, err := inv.successStreaming(context.Background(), &oneShotErrorReader{data: []byte("partial"), err: wantErr}, "")
+	require.NoError(t, err)
+	assert.ErrorIs(t, streamErr, wantErr)
+}
+
+func TestInvocation_StreamingPanicTrailer(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, err := io.Copy(io.Discard, r.Body)
+		require.NoError(t, err)
+		assert.Equal(t, "Runtime.Panic.string", r.Trailer.Get(headerStreamErrorType))
+		w.WriteHeader(http.StatusAccepted)
+	}))
+	defer server.Close()
+
+	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
+	client := newRuntimeClient(server.URL[7:], logger)
+	inv := &invocation{requestID: "req-stream-panic", client: client}
+
+	streamErr, err := inv.successStreaming(context.Background(), panicReader{}, "")
+	require.NoError(t, err)
+	var panicErr *ErrorResponse
+	require.ErrorAs(t, streamErr, &panicErr)
+	assert.Equal(t, "stream panic", panicErr.Message)
+}
+
+type oneShotErrorReader struct {
+	data []byte
+	err  error
+}
+
+func (r *oneShotErrorReader) Read(p []byte) (int, error) {
+	if r.data == nil {
+		return 0, io.EOF
+	}
+	n := copy(p, r.data)
+	r.data = nil
+	return n, r.err
+}
+
+type panicReader struct{}
+
+func (panicReader) Read([]byte) (int, error) {
+	panic("stream panic")
 }
 
 func TestInvocation_Failure(t *testing.T) {
