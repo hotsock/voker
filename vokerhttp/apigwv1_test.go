@@ -3,7 +3,6 @@ package vokerhttp
 import (
 	"context"
 	"encoding/base64"
-	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -69,67 +68,26 @@ func TestAPIGatewayV1Request_Basic(t *testing.T) {
 	assert.Equal(t, "1.2.3.4", req.RemoteAddr)
 }
 
-func TestAPIGatewayV1Request_AWSDocumentedJSONFixture(t *testing.T) {
-	const fixture = `{
-		"resource": "/{proxy+}",
-		"path": "/path/to/resource",
-		"httpMethod": "POST",
-		"headers": {
-			"Host": "1234567890.execute-api.us-east-1.amazonaws.com",
-			"X-Forwarded-For": "192.0.2.1",
-			"header1": "value1",
-			"header2": "value2"
-		},
-		"multiValueHeaders": {
-			"header1": ["value1"],
-			"header2": ["value1", "value2"]
-		},
-		"queryStringParameters": {
-			"parameter1": "value1",
-			"parameter2": "value"
-		},
-		"multiValueQueryStringParameters": {
-			"parameter1": ["value1", "value2"],
-			"parameter2": ["value"]
-		},
-		"pathParameters": {
-			"proxy": "path/to/resource"
-		},
-		"stageVariables": {
-			"stageVariable1": "value1"
-		},
-		"requestContext": {
-			"accountId": "123456789012",
-			"apiId": "1234567890",
-			"domainName": "1234567890.execute-api.us-east-1.amazonaws.com",
-			"httpMethod": "POST",
-			"identity": {
-				"sourceIp": "192.0.2.1",
-				"userAgent": "agent"
-			},
-			"path": "/prod/path/to/resource",
-			"protocol": "HTTP/1.1",
-			"requestId": "id",
-			"requestTimeEpoch": 1428582896000,
-			"resourcePath": "/{proxy+}",
-			"stage": "prod"
-		},
-		"body": "Hello from Lambda",
-		"isBase64Encoded": false
-	}`
-
+func TestAPIGatewayV1Request_LiveAWSJSONFixture(t *testing.T) {
 	var event APIGatewayV1Request
-	require.NoError(t, json.Unmarshal([]byte(fixture), &event))
+	readEventFixture(t, "apigwv1-request.json", &event)
 
 	req, err := (&APIGatewayV1{}).Request(context.Background(), event)
 	require.NoError(t, err)
 
 	assert.Equal(t, "POST", req.Method)
-	assert.Equal(t, "/path/to/resource", req.URL.Path)
-	assert.Equal(t, "1234567890.execute-api.us-east-1.amazonaws.com", req.URL.Host)
-	assert.ElementsMatch(t, []string{"value1", "value2"}, req.URL.Query()["parameter1"])
-	assert.Equal(t, []string{"value1", "value2"}, req.Header.Values("Header2"))
-	assert.Equal(t, "192.0.2.1", req.RemoteAddr)
+	assert.Equal(t, "/capture/space value", req.URL.Path)
+	assert.Equal(t, "/capture/space%20value", req.URL.EscapedPath())
+	assert.Equal(t, "5h7pqvr9u4.execute-api.us-west-2.amazonaws.com", req.URL.Host)
+	assert.Equal(t, []string{"one", "two"}, req.URL.Query()["repeat"])
+	assert.Equal(t, "a+b", req.URL.Query().Get("encodedPlus"))
+	assert.Equal(t, "a b", req.URL.Query().Get("literalPlus"))
+	assert.Equal(t, []string{"first", "second"}, req.Header.Values("X-Voker-Probe"))
+	assert.Equal(t, "68.8.83.18", req.RemoteAddr)
+	assert.Equal(t, "/capture/space%20value?empty=&encodedPlus=a%2Bb&literalPlus=a+b&redirect=https%3A%2F%2Fexample.com%2Fa%2Fb&repeat=one&repeat=two", req.RequestURI)
+	body, err := io.ReadAll(req.Body)
+	require.NoError(t, err)
+	assert.Equal(t, `{"message":"hello from the public internet","unicode":"lambda-λ"}`, string(body))
 }
 
 func TestAPIGatewayV1Request_WithBody(t *testing.T) {

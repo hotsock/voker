@@ -58,39 +58,26 @@ func TestALBRequest_Basic(t *testing.T) {
 	assert.Equal(t, "72.21.198.66", req.RemoteAddr)
 }
 
-func TestALBRequest_AWSDocumentedJSONFixture(t *testing.T) {
-	const fixture = `{
-		"requestContext": {
-			"elb": {
-				"targetGroupArn": "arn:aws:elasticloadbalancing:us-east-1:123456789012:targetgroup/lambda-tg/abcdef123456"
-			}
-		},
-		"httpMethod": "GET",
-		"path": "/lambda",
-		"queryStringParameters": {
-			"name": "lambda"
-		},
-		"headers": {
-			"host": "example.com",
-			"x-forwarded-for": "192.0.2.1",
-			"x-forwarded-port": "443",
-			"x-forwarded-proto": "https"
-		},
-		"body": "",
-		"isBase64Encoded": false
-	}`
-
+func TestALBRequest_LiveAWSJSONFixture(t *testing.T) {
 	var event ALBRequest
-	require.NoError(t, json.Unmarshal([]byte(fixture), &event))
+	readEventFixture(t, "alb-request.json", &event)
 
 	req, err := (&ALB{}).Request(context.Background(), event)
 	require.NoError(t, err)
 
-	assert.Equal(t, "GET", req.Method)
-	assert.Equal(t, "/lambda", req.URL.Path)
-	assert.Equal(t, "name=lambda", req.URL.RawQuery)
-	assert.Equal(t, "example.com", req.URL.Host)
-	assert.Equal(t, "192.0.2.1", req.RemoteAddr)
+	assert.Equal(t, "POST", req.Method)
+	assert.Equal(t, "/capture/space value", req.URL.Path)
+	assert.Equal(t, "/capture/space%20value", req.URL.EscapedPath())
+	assert.Equal(t, "empty=&encodedPlus=a%2Bb&literalPlus=a+b&redirect=https%3A%2F%2Fexample.com%2Fa%2Fb&repeat=one&repeat=two", req.URL.RawQuery)
+	assert.Equal(t, "vokerhtt-ALB-4XF8jCVDRJg4-1316758055.us-west-2.elb.amazonaws.com", req.URL.Host)
+	assert.Equal(t, "http", req.URL.Scheme)
+	assert.Equal(t, "68.8.83.18", req.RemoteAddr)
+	assert.Equal(t, []string{"first", "second"}, req.Header.Values("X-Voker-Probe"))
+	assert.Equal(t, []string{"one", "two"}, req.URL.Query()["repeat"])
+	assert.Equal(t, "/capture/space%20value?empty=&encodedPlus=a%2Bb&literalPlus=a+b&redirect=https%3A%2F%2Fexample.com%2Fa%2Fb&repeat=one&repeat=two", req.RequestURI)
+	body, err := io.ReadAll(req.Body)
+	require.NoError(t, err)
+	assert.Equal(t, `{"message":"hello from the public internet","unicode":"lambda-λ"}`, string(body))
 }
 
 func TestALBRequest_WithBody(t *testing.T) {

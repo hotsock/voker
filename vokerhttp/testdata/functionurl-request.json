@@ -1,0 +1,72 @@
+{
+  "version": "2.0",
+  "routeKey": "$default",
+  "rawPath": "/capture/space%20value",
+  "rawQueryString": "repeat=one&repeat=two&redirect=https%3A%2F%2Fexample.com%2Fa%2Fb&literalPlus=a+b&encodedPlus=a%2Bb&empty=",
+  "cookies": ["session=abc123", "theme=dark"],
+  "headers": {
+    "accept": "*/*",
+    "content-length": "66",
+    "content-type": "application/json",
+    "cookie": "session=abc123; theme=dark",
+    "host": "2cxn22odiwguak4feg4jtt7cwm0ziblr.lambda-url.us-west-2.on.aws",
+    "user-agent": "curl/8.7.1",
+    "x-amzn-tls-cipher-suite": "TLS_AES_128_GCM_SHA256",
+    "x-amzn-tls-version": "TLSv1.3",
+    "x-amzn-trace-id": "Root=1-6a5145aa-290a323a5de9a2e0636377d4",
+    "x-forwarded-for": "68.8.83.18",
+    "x-forwarded-port": "443",
+    "x-forwarded-proto": "https",
+    "x-voker-probe": "first,second"
+  },
+  "queryStringParameters": {
+    "empty": "",
+    "encodedPlus": "a+b",
+    "literalPlus": "a b",
+    "redirect": "https://example.com/a/b",
+    "repeat": "one,two"
+  },
+  "pathParameters": null,
+  "stageVariables": null,
+  "requestContext": {
+    "accountId": "anonymous",
+    "apiId": "2cxn22odiwguak4feg4jtt7cwm0ziblr",
+    "authentication": {
+      "clientCert": {
+        "clientCertPem": "",
+        "subjectDN": "",
+        "issuerDN": "",
+        "serialNumber": "",
+        "validity": {"notBefore": "", "notAfter": ""}
+      }
+    },
+    "authorizer": {
+      "jwt": {"claims": null, "scopes": null},
+      "iam": {
+        "accessKey": "",
+        "accountId": "",
+        "callerId": "",
+        "cognitoIdentity": {"amr": null, "identityId": "", "identityPoolId": ""},
+        "principalOrgId": "",
+        "userArn": "",
+        "userId": ""
+      }
+    },
+    "domainName": "2cxn22odiwguak4feg4jtt7cwm0ziblr.lambda-url.us-west-2.on.aws",
+    "domainPrefix": "2cxn22odiwguak4feg4jtt7cwm0ziblr",
+    "http": {
+      "method": "POST",
+      "path": "/capture/space value",
+      "protocol": "HTTP/1.1",
+      "sourceIp": "68.8.83.18",
+      "userAgent": "curl/8.7.1"
+    },
+    "requestId": "d16a6b55-dea9-4b23-8499-eb85c3d2d904",
+    "routeKey": "$default",
+    "stage": "$default",
+    "time": "10/Jul/2026:19:19:06 +0000",
+    "timeEpoch": 1783711146671
+  },
+  "body": "{\"message\":\"hello from the public internet\",\"unicode\":\"lambda-λ\"}",
+  "isBase64Encoded": false
+}

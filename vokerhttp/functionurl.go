@@ -168,7 +168,10 @@ func buildV2Request(ctx context.Context, event payloadV2Request) (*http.Request,
 	}
 
 	req.RemoteAddr = event.RequestContext.HTTP.SourceIP
-	req.RequestURI = uri
+	// AWS can deliver decoded characters in rawPath (for example, a literal
+	// space from HTTP API v2). Derive RequestURI from the parsed URL so the
+	// request target has valid HTTP escaping while retaining RawQuery.
+	req.RequestURI = req.URL.RequestURI()
 
 	return req, nil
 }

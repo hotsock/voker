@@ -3,7 +3,6 @@ package vokerhttp
 import (
 	"context"
 	"encoding/base64"
-	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -60,62 +59,25 @@ func TestAPIGatewayV2Request_Basic(t *testing.T) {
 	assert.Equal(t, "/my/path?foo=bar&baz=qux", req.RequestURI)
 }
 
-func TestAPIGatewayV2Request_AWSDocumentedJSONFixture(t *testing.T) {
-	const fixture = `{
-		"version": "2.0",
-		"routeKey": "$default",
-		"rawPath": "/my/path",
-		"rawQueryString": "parameter1=value1&parameter1=value2&parameter2=value",
-		"cookies": ["cookie1=value1", "cookie2=value2"],
-		"headers": {
-			"header1": "value1",
-			"header2": "value1,value2",
-			"host": "abc123.execute-api.us-east-1.amazonaws.com"
-		},
-		"queryStringParameters": {
-			"parameter1": "value1,value2",
-			"parameter2": "value"
-		},
-		"requestContext": {
-			"accountId": "123456789012",
-			"apiId": "api-id",
-			"domainName": "abc123.execute-api.us-east-1.amazonaws.com",
-			"domainPrefix": "abc123",
-			"http": {
-				"method": "POST",
-				"path": "/my/path",
-				"protocol": "HTTP/1.1",
-				"sourceIp": "192.0.2.1",
-				"userAgent": "agent"
-			},
-			"requestId": "id",
-			"routeKey": "$default",
-			"stage": "$default",
-			"time": "12/Mar/2020:19:03:58 +0000",
-			"timeEpoch": 1583348638390
-		},
-		"body": "Hello from Lambda",
-		"pathParameters": {
-			"parameter1": "value1"
-		},
-		"isBase64Encoded": false,
-		"stageVariables": {
-			"stageVariable1": "value1",
-			"stageVariable2": "value2"
-		}
-	}`
-
+func TestAPIGatewayV2Request_LiveAWSJSONFixture(t *testing.T) {
 	var event APIGatewayV2Request
-	require.NoError(t, json.Unmarshal([]byte(fixture), &event))
+	readEventFixture(t, "apigwv2-request.json", &event)
 
 	req, err := (&APIGatewayV2{}).Request(context.Background(), event)
 	require.NoError(t, err)
 
 	assert.Equal(t, "POST", req.Method)
-	assert.Equal(t, "/my/path", req.URL.Path)
-	assert.Equal(t, "parameter1=value1&parameter1=value2&parameter2=value", req.URL.RawQuery)
-	assert.Equal(t, "abc123.execute-api.us-east-1.amazonaws.com", req.URL.Host)
-	assert.Equal(t, "192.0.2.1", req.RemoteAddr)
+	assert.Equal(t, "/capture/space value", req.URL.Path)
+	assert.Equal(t, "/capture/space%20value", req.URL.EscapedPath())
+	assert.Equal(t, "repeat=one&repeat=two&redirect=https%3A%2F%2Fexample.com%2Fa%2Fb&literalPlus=a+b&encodedPlus=a%2Bb&empty=", req.URL.RawQuery)
+	assert.Equal(t, "sjzepsqsu5.execute-api.us-west-2.amazonaws.com", req.URL.Host)
+	assert.Equal(t, "68.8.83.18", req.RemoteAddr)
+	assert.Equal(t, []string{"first,second"}, req.Header.Values("X-Voker-Probe"))
+	assert.Equal(t, "session=abc123; theme=dark", req.Header.Get("Cookie"))
+	assert.Equal(t, "/capture/space%20value?repeat=one&repeat=two&redirect=https%3A%2F%2Fexample.com%2Fa%2Fb&literalPlus=a+b&encodedPlus=a%2Bb&empty=", req.RequestURI)
+	body, err := io.ReadAll(req.Body)
+	require.NoError(t, err)
+	assert.Equal(t, `{"message":"hello from the public internet","unicode":"lambda-λ"}`, string(body))
 }
 
 func TestAPIGatewayV2Request_DomainNameFallbackHost(t *testing.T) {

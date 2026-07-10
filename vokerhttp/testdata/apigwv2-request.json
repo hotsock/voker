@@ -1,0 +1,69 @@
+{
+  "version": "2.0",
+  "routeKey": "$default",
+  "rawPath": "/capture/space value",
+  "rawQueryString": "repeat=one&repeat=two&redirect=https%3A%2F%2Fexample.com%2Fa%2Fb&literalPlus=a+b&encodedPlus=a%2Bb&empty=",
+  "cookies": ["session=abc123", "theme=dark"],
+  "headers": {
+    "accept": "*/*",
+    "content-length": "66",
+    "content-type": "application/json",
+    "host": "sjzepsqsu5.execute-api.us-west-2.amazonaws.com",
+    "user-agent": "curl/8.7.1",
+    "x-amzn-trace-id": "Root=1-6a5145a9-1bae89e2512ec92d5d9438a0",
+    "x-forwarded-for": "68.8.83.18",
+    "x-forwarded-port": "443",
+    "x-forwarded-proto": "https",
+    "x-voker-probe": "first,second"
+  },
+  "queryStringParameters": {
+    "empty": "",
+    "encodedPlus": "a+b",
+    "literalPlus": "a b",
+    "redirect": "https://example.com/a/b",
+    "repeat": "one,two"
+  },
+  "pathParameters": null,
+  "stageVariables": null,
+  "requestContext": {
+    "accountId": "910345601053",
+    "apiId": "sjzepsqsu5",
+    "authentication": {
+      "clientCert": {
+        "clientCertPem": "",
+        "subjectDN": "",
+        "issuerDN": "",
+        "serialNumber": "",
+        "validity": {"notBefore": "", "notAfter": ""}
+      }
+    },
+    "authorizer": {
+      "jwt": {"claims": null, "scopes": null},
+      "iam": {
+        "accessKey": "",
+        "accountId": "",
+        "callerId": "",
+        "cognitoIdentity": {"amr": null, "identityId": "", "identityPoolId": ""},
+        "principalOrgId": "",
+        "userArn": "",
+        "userId": ""
+      }
+    },
+    "domainName": "sjzepsqsu5.execute-api.us-west-2.amazonaws.com",
+    "domainPrefix": "sjzepsqsu5",
+    "http": {
+      "method": "POST",
+      "path": "/capture/space value",
+      "protocol": "HTTP/1.1",
+      "sourceIp": "68.8.83.18",
+      "userAgent": "curl/8.7.1"
+    },
+    "requestId": "ATfSmjLgPHcESJw=",
+    "routeKey": "$default",
+    "stage": "$default",
+    "time": "10/Jul/2026:19:19:05 +0000",
+    "timeEpoch": 1783711145766
+  },
+  "body": "{\"message\":\"hello from the public internet\",\"unicode\":\"lambda-λ\"}",
+  "isBase64Encoded": false
+}

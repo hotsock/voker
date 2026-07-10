@@ -1,0 +1,88 @@
+{
+  "resource": "/{proxy+}",
+  "path": "/capture/space%20value",
+  "httpMethod": "POST",
+  "headers": {
+    "Host": "5h7pqvr9u4.execute-api.us-west-2.amazonaws.com",
+    "User-Agent": "curl/8.7.1",
+    "X-Amzn-Trace-Id": "Root=1-6a5145a8-536f3e792f6be9b44c1f46fa",
+    "X-Forwarded-For": "68.8.83.18",
+    "X-Forwarded-Port": "443",
+    "X-Forwarded-Proto": "https",
+    "accept": "*/*",
+    "content-type": "application/json",
+    "cookie": "session=abc123; theme=dark",
+    "x-voker-probe": "second"
+  },
+  "multiValueHeaders": {
+    "Host": ["5h7pqvr9u4.execute-api.us-west-2.amazonaws.com"],
+    "User-Agent": ["curl/8.7.1"],
+    "X-Amzn-Trace-Id": ["Root=1-6a5145a8-536f3e792f6be9b44c1f46fa"],
+    "X-Forwarded-For": ["68.8.83.18"],
+    "X-Forwarded-Port": ["443"],
+    "X-Forwarded-Proto": ["https"],
+    "accept": ["*/*"],
+    "content-type": ["application/json"],
+    "cookie": ["session=abc123; theme=dark"],
+    "x-voker-probe": ["first", "second"]
+  },
+  "queryStringParameters": {
+    "empty": "",
+    "encodedPlus": "a+b",
+    "literalPlus": "a b",
+    "redirect": "https://example.com/a/b",
+    "repeat": "two"
+  },
+  "multiValueQueryStringParameters": {
+    "empty": [""],
+    "encodedPlus": ["a+b"],
+    "literalPlus": ["a b"],
+    "redirect": ["https://example.com/a/b"],
+    "repeat": ["one", "two"]
+  },
+  "pathParameters": {"proxy": "capture/space%20value"},
+  "stageVariables": null,
+  "requestContext": {
+    "accountId": "910345601053",
+    "apiId": "5h7pqvr9u4",
+    "authorizer": null,
+    "domainName": "5h7pqvr9u4.execute-api.us-west-2.amazonaws.com",
+    "domainPrefix": "5h7pqvr9u4",
+    "extendedRequestId": "ATfSdF7nPHcErRA=",
+    "httpMethod": "POST",
+    "identity": {
+      "accessKey": "",
+      "accountId": "",
+      "apiKey": "",
+      "apiKeyId": "",
+      "caller": "",
+      "cognitoAuthenticationProvider": "",
+      "cognitoAuthenticationType": "",
+      "cognitoIdentityId": "",
+      "cognitoIdentityPoolId": "",
+      "principalOrgId": "",
+      "sourceIp": "68.8.83.18",
+      "user": "",
+      "userAgent": "curl/8.7.1",
+      "userArn": "",
+      "clientCert": {
+        "clientCertPem": "",
+        "subjectDN": "",
+        "issuerDN": "",
+        "serialNumber": "",
+        "validity": {"notBefore": "", "notAfter": ""}
+      }
+    },
+    "operationName": "",
+    "path": "/live/capture/space%20value",
+    "protocol": "HTTP/1.1",
+    "requestId": "7c2af7db-31f3-42b5-8a6d-9ffc74e3b9e0",
+    "requestTime": "10/Jul/2026:19:19:04 +0000",
+    "requestTimeEpoch": 1783711144836,
+    "resourceId": "al6gqb",
+    "resourcePath": "/{proxy+}",
+    "stage": "live"
+  },
+  "body": "{\"message\":\"hello from the public internet\",\"unicode\":\"lambda-λ\"}",
+  "isBase64Encoded": false
+}
