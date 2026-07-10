@@ -4,6 +4,7 @@ AWS_PROFILE ?= default
 AWS_REGION ?= us-west-2
 STACK_NAME ?= vokerhttp-aws-ingress-probe
 GOARCH ?= arm64
+PACKAGED_TEMPLATE ?= /tmp/$(STACK_NAME)-packaged.yml
 
 AWS_ARGS := --profile $(AWS_PROFILE) --region $(AWS_REGION)
 ACCOUNT_ID = $(shell $(AWS) sts get-caller-identity $(AWS_ARGS) --query Account --output text)
@@ -18,15 +19,12 @@ bin/bootstrap: main.go go.mod go.sum ../../go.mod $(VOKER_SOURCES)
 	mkdir -p bin
 	CGO_ENABLED=0 GOOS=linux GOARCH=$(GOARCH) $(GOLANG) build -trimpath -ldflags="-s -w" -o $@ .
 
-bin/function.zip: bin/bootstrap
-	cd bin && zip -q -FS function.zip bootstrap
-
 .PHONY: test
 test:
 	$(GOLANG) test ./...
 
 .PHONY: build
-build: test bin/function.zip
+build: test bin/bootstrap
 
 .PHONY: artifact-bucket
 artifact-bucket:
@@ -35,8 +33,8 @@ artifact-bucket:
 
 .PHONY: deploy
 deploy: build artifact-bucket
-	$(AWS) cloudformation package $(AWS_ARGS) --template-file template.yml --s3-bucket $(ARTIFACT_BUCKET) --output-template-file bin/packaged.yml
-	$(AWS) cloudformation deploy $(AWS_ARGS) --stack-name $(STACK_NAME) --template-file bin/packaged.yml --capabilities CAPABILITY_NAMED_IAM --parameter-overrides VpcId=$(VPC_ID) SubnetA=$(SUBNET_A) SubnetB=$(SUBNET_B)
+	$(AWS) cloudformation package $(AWS_ARGS) --template-file template.yml --s3-bucket $(ARTIFACT_BUCKET) --output-template-file $(PACKAGED_TEMPLATE)
+	$(AWS) cloudformation deploy $(AWS_ARGS) --stack-name $(STACK_NAME) --template-file $(PACKAGED_TEMPLATE) --capabilities CAPABILITY_NAMED_IAM --parameter-overrides VpcId=$(VPC_ID) SubnetA=$(SUBNET_A) SubnetB=$(SUBNET_B)
 	$(AWS) cloudformation describe-stacks $(AWS_ARGS) --stack-name $(STACK_NAME) --query 'Stacks[0].Outputs' --output table
 
 .PHONY: delete

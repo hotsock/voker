@@ -30,7 +30,7 @@ Resources:
         Version: "2012-10-17"
         Statement:
           - Effect: Allow
-            Principal: {Service: lambda.amazonaws.com}
+            Principal: { Service: lambda.amazonaws.com }
             Action: sts:AssumeRole
       ManagedPolicyArns:
         - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
@@ -38,19 +38,19 @@ Resources:
   ALBFunction:
     Type: AWS::Serverless::Function
     Properties:
-      CodeUri: ./bin/function.zip
+      CodeUri: ./bin
       Role: !GetAtt ProbeRole.Arn
-      Environment: {Variables: {VOKER_ADAPTER: alb}}
+      Environment: { Variables: { VOKER_ADAPTER: alb } }
   APIGatewayV1Function:
     Type: AWS::Serverless::Function
     Properties:
-      CodeUri: ./bin/function.zip
+      CodeUri: ./bin
       Role: !GetAtt ProbeRole.Arn
-      Environment: {Variables: {VOKER_ADAPTER: apigwv1}}
+      Environment: { Variables: { VOKER_ADAPTER: apigwv1 } }
   APIGatewayV1StreamingFunction:
     Type: AWS::Serverless::Function
     Properties:
-      CodeUri: ./bin/function.zip
+      CodeUri: ./bin
       Role: !GetAtt ProbeRole.Arn
       Environment:
         Variables:
@@ -59,19 +59,19 @@ Resources:
   APIGatewayV2Function:
     Type: AWS::Serverless::Function
     Properties:
-      CodeUri: ./bin/function.zip
+      CodeUri: ./bin
       Role: !GetAtt ProbeRole.Arn
-      Environment: {Variables: {VOKER_ADAPTER: apigwv2}}
+      Environment: { Variables: { VOKER_ADAPTER: apigwv2 } }
   FunctionURLFunction:
     Type: AWS::Serverless::Function
     Properties:
-      CodeUri: ./bin/function.zip
+      CodeUri: ./bin
       Role: !GetAtt ProbeRole.Arn
-      Environment: {Variables: {VOKER_ADAPTER: functionurl}}
+      Environment: { Variables: { VOKER_ADAPTER: functionurl } }
   FunctionURLStreamingFunction:
     Type: AWS::Serverless::Function
     Properties:
-      CodeUri: ./bin/function.zip
+      CodeUri: ./bin
       Role: !GetAtt ProbeRole.Arn
       Environment:
         Variables:
@@ -155,7 +155,7 @@ Resources:
     Type: AWS::ApiGateway::RestApi
     Properties:
       BinaryMediaTypes: ["*/*"]
-      EndpointConfiguration: {Types: [REGIONAL]}
+      EndpointConfiguration: { Types: [REGIONAL] }
       Name: !Sub ${AWS::StackName}-rest-buffered
   RestProxyResource:
     Type: AWS::ApiGateway::Resource
@@ -205,7 +205,7 @@ Resources:
   RestStreamingAPI:
     Type: AWS::ApiGateway::RestApi
     Properties:
-      EndpointConfiguration: {Types: [REGIONAL]}
+      EndpointConfiguration: { Types: [REGIONAL] }
       Name: !Sub ${AWS::StackName}-rest-streaming
   RestStreamingProxyResource:
     Type: AWS::ApiGateway::Resource
