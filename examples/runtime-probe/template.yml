@@ -1,0 +1,105 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: Short-lived live AWS probe for Voker runtime behavior
+
+Globals:
+  Function:
+    Architectures: [arm64]
+    Handler: bootstrap
+    LoggingConfig:
+      ApplicationLogLevel: INFO
+      LogFormat: JSON
+      SystemLogLevel: INFO
+    MemorySize: 128
+    Runtime: provided.al2023
+    Timeout: 10
+
+Resources:
+  ProbeRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: lambda.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+
+  ProbeFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ./bin
+      Role: !GetAtt ProbeRole.Arn
+      Environment: { Variables: { VOKER_PROBE_MODE: runtime } }
+
+  InitErrorFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ./bin
+      Role: !GetAtt ProbeRole.Arn
+      Environment: { Variables: { VOKER_PROBE_MODE: init-error } }
+
+  InitPanicFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ./bin
+      Role: !GetAtt ProbeRole.Arn
+      Environment: { Variables: { VOKER_PROBE_MODE: init-panic } }
+
+  RegisterErrorFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ./bin
+      Role: !GetAtt ProbeRole.Arn
+      Environment: { Variables: { VOKER_PROBE_MODE: register-error } }
+
+  ProbeLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/${ProbeFunction}
+      RetentionInDays: 1
+  InitErrorLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/${InitErrorFunction}
+      RetentionInDays: 1
+  InitPanicLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/${InitPanicFunction}
+      RetentionInDays: 1
+  RegisterErrorLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/${RegisterErrorFunction}
+      RetentionInDays: 1
+
+  ProbeFunctionURL:
+    Type: AWS::Lambda::Url
+    Properties:
+      AuthType: NONE
+      InvokeMode: RESPONSE_STREAM
+      TargetFunctionArn: !GetAtt ProbeFunction.Arn
+  ProbeFunctionURLPublicInvokeURL:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunctionUrl
+      FunctionName: !Ref ProbeFunction
+      FunctionUrlAuthType: NONE
+      Principal: "*"
+  ProbeFunctionURLPublicInvokeFunction:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref ProbeFunction
+      InvokedViaFunctionUrl: true
+      Principal: "*"
+
+Outputs:
+  ProbeFunctionName: { Value: !Ref ProbeFunction }
+  InitErrorFunctionName: { Value: !Ref InitErrorFunction }
+  InitPanicFunctionName: { Value: !Ref InitPanicFunction }
+  RegisterErrorFunctionName: { Value: !Ref RegisterErrorFunction }
+  ProbeFunctionURL: { Value: !GetAtt ProbeFunctionURL.FunctionUrl }

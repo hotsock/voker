@@ -190,6 +190,9 @@ vokerhttp.StartHTTPStreaming(mux, &vokerhttp.APIGatewayV1{})
 Streaming REST integrations must also use API Gateway's
 `response-streaming-invocations` integration URI. See the complete deployable
 matrix in [`examples/aws-ingress-probe`](examples/aws-ingress-probe/README.md).
+For live Runtime API regression coverage—including buffered/streaming mode
+selection, stream errors and cleanup, custom error payloads, and initialization
+failure reporting—see [`examples/runtime-probe`](examples/runtime-probe/README.md).
 
 ### CloudFormation custom resources
 
