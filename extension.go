@@ -49,8 +49,8 @@ func newExtensionManager(runtimeAPI string, extensions []InternalExtension, logg
 func (m *extensionManager) start() error {
 	for _, ext := range m.extensions {
 		if ext.OnInit != nil {
-			if err := ext.OnInit(); err != nil {
-				return fmt.Errorf("extension %s init failed: %w", ext.Name, err)
+			if err := callExtensionInit(ext); err != nil {
+				return err
 			}
 		}
 
@@ -65,6 +65,23 @@ func (m *extensionManager) start() error {
 		}
 
 		m.wg.Go(func() { m.eventLoop(ext, id) })
+	}
+	return nil
+}
+
+func callExtensionInit(ext InternalExtension) (responseErr *ErrorResponse) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			responseErr = newPanicResponse(recovered)
+			responseErr.Message = fmt.Sprintf("extension %s init panicked: %s", ext.Name, responseErr.Message)
+		}
+	}()
+
+	if err := ext.OnInit(); err != nil {
+		original := newErrorResponse(err)
+		response := *original
+		response.Message = fmt.Sprintf("extension %s init failed: %s", ext.Name, original.Message)
+		return &response
 	}
 	return nil
 }

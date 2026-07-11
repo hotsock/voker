@@ -72,6 +72,17 @@ func handler(ctx context.Context, event MyEvent) (MyResponse, error) {
 }
 ```
 
+Return a `*voker.ErrorResponse` when the function error needs a stable,
+application-specific error type. Voker preserves its `errorType`,
+`errorMessage`, and optional stack trace in the Runtime API error payload:
+
+```go
+return MyResponse{}, &voker.ErrorResponse{
+    Type:    "Application.ValidationError",
+    Message: "name is required",
+}
+```
+
 ### Simple Event Types
 
 ```go
@@ -143,7 +154,9 @@ payloads as-is instead of voker rejecting them.
 Return an `io.Reader` to stream bytes through the Lambda Runtime API instead of
 JSON-encoding the response. If the returned value also implements
 `ContentType() string`, voker propagates that content type; otherwise it uses
-`application/octet-stream`.
+`application/octet-stream`. If it also implements `io.Closer`, voker closes it
+after the Runtime API finishes consuming the response, including when the
+stream fails.
 
 ```go
 func handler(ctx context.Context, event MyEvent) (io.Reader, error) {

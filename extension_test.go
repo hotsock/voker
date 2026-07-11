@@ -3,6 +3,8 @@ package voker
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -110,6 +112,46 @@ func TestExtensionManager_Start_OnInitError(t *testing.T) {
 
 	if err == nil {
 		t.Fatal("expected error from OnInit, got nil")
+	}
+	var response *ErrorResponse
+	if !errors.As(err, &response) {
+		t.Fatalf("expected ErrorResponse, got %T", err)
+	}
+	if response.Type != "ExtensionError" {
+		t.Errorf("expected ExtensionError, got %q", response.Type)
+	}
+	if response.Message != "extension TestExtension init failed: init failed" {
+		t.Errorf("unexpected message %q", response.Message)
+	}
+}
+
+func TestExtensionManager_Start_OnInitPanic(t *testing.T) {
+	ext := InternalExtension{
+		Name: "PanickingExtension",
+		OnInit: func() error {
+			panic("setup exploded")
+		},
+	}
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	mgr := newExtensionManager("127.0.0.1:1", []InternalExtension{ext}, logger)
+	err := mgr.start()
+
+	var response *ErrorResponse
+	if !errors.As(err, &response) {
+		t.Fatalf("expected ErrorResponse, got %T", err)
+	}
+	if response.Type != "Runtime.Panic.string" {
+		t.Errorf("expected panic error type, got %q", response.Type)
+	}
+	if response.Message != "extension PanickingExtension init panicked: setup exploded" {
+		t.Errorf("unexpected message %q", response.Message)
+	}
+	if len(response.StackTrace) == 0 {
+		t.Error("expected panic stack trace")
+	}
+	if !response.fatal {
+		t.Error("expected panic response to be fatal")
 	}
 }
 

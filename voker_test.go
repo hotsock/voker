@@ -97,6 +97,86 @@ func TestHandleInvocation_Streaming(t *testing.T) {
 	require.NoError(t, handleInvocation(client, handler, &options{logger: logger}))
 }
 
+func TestHandleInvocation_ConditionallyBufferedOrStreaming(t *testing.T) {
+	invocation := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/2018-06-01/runtime/invocation/next":
+			invocation++
+			w.Header().Set(headerDeadlineMS, "999999999999999")
+			switch invocation {
+			case 1:
+				w.Header().Set(headerRequestID, "conditional-buffered")
+				_ = json.NewEncoder(w).Encode(testEvent{Name: "buffered"})
+			case 2:
+				w.Header().Set(headerRequestID, "conditional-streaming")
+				_ = json.NewEncoder(w).Encode(testEvent{Name: "streaming"})
+			default:
+				t.Fatalf("unexpected invocation %d", invocation)
+			}
+
+		case "/2018-06-01/runtime/invocation/conditional-buffered/response":
+			assert.Empty(t, r.Header.Get(headerResponseMode))
+			assert.Equal(t, contentTypeJSON, r.Header.Get(headerContentType))
+			assert.Empty(t, r.TransferEncoding)
+			body, err := io.ReadAll(r.Body)
+			require.NoError(t, err)
+			assert.JSONEq(t, `{"message":"plain response"}`, string(body))
+			w.WriteHeader(http.StatusAccepted)
+
+		case "/2018-06-01/runtime/invocation/conditional-streaming/response":
+			assert.Equal(t, "streaming", r.Header.Get(headerResponseMode))
+			assert.Equal(t, "application/octet-stream", r.Header.Get(headerContentType))
+			assert.Equal(t, []string{"chunked"}, r.TransferEncoding)
+			body, err := io.ReadAll(r.Body)
+			require.NoError(t, err)
+			assert.Equal(t, "streamed response", string(body))
+			w.WriteHeader(http.StatusAccepted)
+		}
+	}))
+	defer server.Close()
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	client := newRuntimeClient(server.Listener.Addr().String(), logger)
+	handler := func(_ context.Context, event testEvent) (any, error) {
+		if event.Name == "streaming" {
+			return strings.NewReader("streamed response"), nil
+		}
+		return testResponse{Message: "plain response"}, nil
+	}
+
+	require.NoError(t, handleInvocation(client, handler, &options{logger: logger}))
+	require.NoError(t, handleInvocation(client, handler, &options{logger: logger}))
+	assert.Equal(t, 2, invocation)
+}
+
+func TestHandleInvocation_StreamingPanicIsFatal(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/2018-06-01/runtime/invocation/next":
+			w.Header().Set(headerRequestID, "stream-panic-request")
+			w.Header().Set(headerDeadlineMS, "999999999999999")
+			w.WriteHeader(http.StatusOK)
+			_, _ = io.WriteString(w, `{}`)
+		case "/2018-06-01/runtime/invocation/stream-panic-request/response":
+			_, err := io.Copy(io.Discard, r.Body)
+			require.NoError(t, err)
+			assert.Equal(t, "Runtime.Panic.string", r.Trailer.Get(headerStreamErrorType))
+			w.WriteHeader(http.StatusAccepted)
+		}
+	}))
+	defer server.Close()
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	client := newRuntimeClient(server.Listener.Addr().String(), logger)
+	handler := func(context.Context, testEvent) (io.Reader, error) {
+		return panicReader{}, nil
+	}
+
+	err := handleInvocation(client, handler, &options{logger: logger})
+	assert.ErrorIs(t, err, errHandlerPanicked)
+}
+
 type contentTypeReader struct {
 	io.Reader
 }
@@ -150,6 +230,67 @@ func TestHandleInvocation_HandlerError(t *testing.T) {
 	err := handleInvocation(client, handler, &options{logger: logger})
 	require.NoError(t, err)
 	assert.True(t, errorReceived)
+}
+
+func TestCallHandler_PreservesTypedErrorResponse(t *testing.T) {
+	want := &ErrorResponse{
+		Type:       "Application.ValidationError",
+		Message:    "name is required",
+		StackTrace: []StackFrame{{Path: "handler.go", Line: 42, Label: "handler"}},
+	}
+	handler := func(context.Context, testEvent) (testResponse, error) {
+		return testResponse{}, want
+	}
+
+	_, err := callHandler(context.Background(), []byte(`{"name":""}`), handler)
+	assert.Same(t, want, err)
+}
+
+func TestSendError_TypedStackTraceIsNotFatal(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusAccepted)
+	}))
+	defer server.Close()
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	inv := &invocation{requestID: "typed-error", client: newRuntimeClient(server.Listener.Addr().String(), logger)}
+	errResponse := &ErrorResponse{
+		Type:       "Application.ValidationError",
+		Message:    "invalid input",
+		StackTrace: []StackFrame{{Path: "handler.go", Line: 42, Label: "handler"}},
+	}
+
+	require.NoError(t, sendError(context.Background(), inv, errResponse, logger))
+}
+
+func TestSendInitError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, "/2018-06-01/runtime/init/error", r.URL.Path)
+		var response ErrorResponse
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&response))
+		assert.Equal(t, "ExtensionError", response.Type)
+		assert.Equal(t, "extension setup failed", response.Message)
+		w.WriteHeader(http.StatusAccepted)
+	}))
+	defer server.Close()
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	client := newRuntimeClient(server.Listener.Addr().String(), logger)
+	err := &ErrorResponse{Type: "ExtensionError", Message: "extension setup failed"}
+	require.NoError(t, sendInitError(client, err))
+}
+
+func TestSendInitError_ReportFailure(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer server.Close()
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	client := newRuntimeClient(server.Listener.Addr().String(), logger)
+	err := sendInitError(client, errors.New("extension setup failed"))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "failed to send initialization error")
 }
 
 func TestHandleInvocation_Panic(t *testing.T) {
@@ -311,6 +452,31 @@ func TestHandleInvocation_WithXRayTrace(t *testing.T) {
 
 	err = handleInvocation(client, handlerNoXRay, &options{enableTraceID: false, logger: logger})
 	require.NoError(t, err)
+}
+
+func TestHandleInvocation_ClearsStaleXRayTrace(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/2018-06-01/runtime/invocation/next":
+			w.Header().Set(headerRequestID, "req-without-trace")
+			w.Header().Set(headerDeadlineMS, "999999999999999")
+			w.WriteHeader(http.StatusOK)
+			_ = json.NewEncoder(w).Encode(testEvent{Name: "test"})
+		case "/2018-06-01/runtime/invocation/req-without-trace/response":
+			w.WriteHeader(http.StatusAccepted)
+		}
+	}))
+	defer server.Close()
+
+	t.Setenv("_X_AMZN_TRACE_ID", "stale-trace-id")
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	client := newRuntimeClient(server.Listener.Addr().String(), logger)
+	handler := func(context.Context, testEvent) (testResponse, error) {
+		assert.Empty(t, os.Getenv("_X_AMZN_TRACE_ID"))
+		return testResponse{Message: "ok"}, nil
+	}
+
+	require.NoError(t, handleInvocation(client, handler, &options{enableTraceID: true, logger: logger}))
 }
 
 func TestParseDeadline(t *testing.T) {

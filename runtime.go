@@ -39,6 +39,7 @@ var userAgent = fmt.Sprintf("voker/%s go/%s", vokerVersion, runtime.Version())
 type runtimeClient struct {
 	baseURL    string
 	nextURL    string
+	initURL    string
 	httpClient *http.Client
 	logger     *slog.Logger
 }
@@ -49,11 +50,16 @@ func newRuntimeClient(runtimeAPI string, logger *slog.Logger) *runtimeClient {
 	return &runtimeClient{
 		baseURL: baseURL,
 		nextURL: baseURL + "next",
+		initURL: fmt.Sprintf("http://%s/%s/runtime/init/error", runtimeAPI, runtimeAPIVersion),
 		httpClient: &http.Client{
 			Timeout: 0, // No timeout for runtime API connections
 		},
 		logger: logger,
 	}
+}
+
+func (c *runtimeClient) initFailure(errorPayload []byte) error {
+	return c.post(context.Background(), c.initURL, errorPayload)
 }
 
 type invocation struct {
