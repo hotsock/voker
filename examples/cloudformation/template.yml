@@ -1,0 +1,42 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: Voker CloudFormation custom resource example
+
+Parameters:
+  Message:
+    Type: String
+    Default: hello from CloudFormation
+  Count:
+    Type: Number
+    Default: 7
+
+Resources:
+  ExampleFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "${AWS::StackName}-handler"
+      Architectures: [arm64]
+      CodeUri: ./bin
+      Description: Voker CloudFormation custom resource example
+      Handler: bootstrap
+      MemorySize: 128
+      Runtime: provided.al2023
+      Timeout: 30
+
+  ExampleResource:
+    Type: Custom::VokerExample
+    Properties:
+      ServiceToken: !GetAtt ExampleFunction.Arn
+      ServiceTimeout: 60
+      Message: !Ref Message
+      Count: !Ref Count
+
+Outputs:
+  Echo:
+    Value: !GetAtt ExampleResource.Echo
+  Count:
+    Value: !GetAtt ExampleResource.Count
+  RequestType:
+    Value: !GetAtt ExampleResource.RequestType
+  PhysicalResourceID:
+    Value: !Ref ExampleResource

@@ -178,6 +178,59 @@ Streaming REST integrations must also use API Gateway's
 `response-streaming-invocations` integration URI. See the complete deployable
 matrix in [`examples/aws-ingress-probe`](examples/aws-ingress-probe/README.md).
 
+### CloudFormation custom resources
+
+Use `vokercfn.Start` to run a type-safe CloudFormation custom resource. It
+handles the presigned response URL protocol, reports handler errors as
+CloudFormation failures, and supplies safe physical resource ID fallbacks.
+
+```go
+package main
+
+import (
+    "context"
+    "fmt"
+
+    "github.com/hotsock/voker/vokercfn"
+)
+
+type Properties struct {
+    Name string `json:"Name"`
+}
+
+type Data struct {
+    ARN string `json:"Arn"`
+}
+
+func handler(ctx context.Context, event vokercfn.Event[Properties]) (vokercfn.Result[Data], error) {
+    switch event.RequestType {
+    case vokercfn.RequestCreate:
+        return vokercfn.Result[Data]{
+            PhysicalResourceID: "thing-123",
+            Data: Data{ARN: "arn:example:thing-123"},
+        }, nil
+    case vokercfn.RequestUpdate, vokercfn.RequestDelete:
+        return vokercfn.Result[Data]{
+            PhysicalResourceID: event.PhysicalResourceID,
+        }, nil
+    default:
+        return vokercfn.Result[Data]{}, fmt.Errorf("unknown request type %q", event.RequestType)
+    }
+}
+
+func main() {
+    vokercfn.Start(handler)
+}
+```
+
+`Result.Data` values are available through `Fn::GetAtt`. Set `Result.NoEcho`
+to mask them in CloudFormation responses. Returning a different physical
+resource ID from an update tells CloudFormation the resource was replaced.
+Responses that cannot be encoded or exceed CloudFormation's 4096-byte limit
+are converted to compact `FAILED` responses so stack operations do not wait
+for a timeout. See [`examples/cloudformation`](examples/cloudformation) for a
+deployable example validated against Create, Update, and Delete events in AWS.
+
 ## Lambda Context
 
 The `LambdaContext` type contains metadata about the invocation:
