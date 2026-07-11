@@ -14,7 +14,7 @@ It uses the default VPC in `us-west-2`, creates a temporary S3 artifact bucket,
 and prints each public endpoint after the stack is ready.
 
 ```sh
-make deploy AWS_PROFILE=applyology STACK_NAME=vokerhttp-aws-ingress-probe
+make deploy STACK_NAME=vokerhttp-aws-ingress-probe
 ```
 
 Send requests to the printed endpoints. `/` echoes the reconstructed
@@ -29,5 +29,5 @@ function's CloudWatch log group.
 Delete every resource created by the example when finished:
 
 ```sh
-make delete AWS_PROFILE=applyology STACK_NAME=vokerhttp-aws-ingress-probe
+make delete STACK_NAME=vokerhttp-aws-ingress-probe
 ```

@@ -1,0 +1,12 @@
+{
+  "Status": "SUCCESS",
+  "PhysicalResourceId": "voker-cloudformation-observed-resource",
+  "StackId": "arn:aws:cloudformation:us-west-2:123456789012:stack/voker-cloudformation-example/96896520-7ca9-11f1-99e5-06858cc65c2f",
+  "RequestId": "6245fb70-1335-46ef-8452-2a0cde2f8238",
+  "LogicalResourceId": "ExampleResource",
+  "Data": {
+    "Echo": "hello from CloudFormation",
+    "Count": "7",
+    "RequestType": "Create"
+  }
+}

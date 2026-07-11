@@ -1,0 +1,12 @@
+{
+  "Status": "SUCCESS",
+  "PhysicalResourceId": "voker-cloudformation-observed-resource",
+  "StackId": "arn:aws:cloudformation:us-west-2:123456789012:stack/voker-cloudformation-example/96896520-7ca9-11f1-99e5-06858cc65c2f",
+  "RequestId": "5006da0b-5046-4d34-b25e-96a1afedd295",
+  "LogicalResourceId": "ExampleResource",
+  "Data": {
+    "Echo": "updated from CloudFormation",
+    "Count": "11",
+    "RequestType": "Delete"
+  }
+}
