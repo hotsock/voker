@@ -13,6 +13,7 @@ type ErrorResponse struct {
 	Type       string       `json:"errorType"`
 	Message    string       `json:"errorMessage"`
 	StackTrace []StackFrame `json:"stackTrace,omitempty"`
+	fatal      bool
 }
 
 // Error implements the error interface for ErrorResponse
@@ -51,6 +52,10 @@ type StackFrame struct {
 
 // newErrorResponse creates an ErrorResponse from a regular error
 func newErrorResponse(err error) *ErrorResponse {
+	if typed, ok := err.(*ErrorResponse); ok {
+		return typed
+	}
+
 	errorType := getErrorType(err)
 
 	return &ErrorResponse{
@@ -102,6 +107,7 @@ func newPanicResponse(panicValue any) *ErrorResponse {
 		Message:    message,
 		Type:       errorType,
 		StackTrace: captureStackTrace(),
+		fatal:      true,
 	}
 }
 

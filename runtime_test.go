@@ -1,6 +1,7 @@
 package voker
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -138,6 +139,37 @@ func TestInvocation_SuccessStreaming(t *testing.T) {
 	require.NoError(t, <-producerResult)
 }
 
+type closeTrackingReader struct {
+	io.Reader
+	closed bool
+}
+
+func (r *closeTrackingReader) Close() error {
+	r.closed = true
+	return nil
+}
+
+func TestInvocation_SuccessStreamingClosesReader(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, err := io.Copy(io.Discard, r.Body)
+		require.NoError(t, err)
+		w.WriteHeader(http.StatusAccepted)
+	}))
+	defer server.Close()
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	inv := &invocation{
+		requestID: "req-stream-close",
+		client:    newRuntimeClient(server.Listener.Addr().String(), logger),
+	}
+	reader := &closeTrackingReader{Reader: bytes.NewBufferString("response")}
+
+	streamErr, err := inv.successStreaming(context.Background(), reader, "")
+	require.NoError(t, err)
+	require.NoError(t, streamErr)
+	assert.True(t, reader.closed)
+}
+
 func TestInvocation_StreamingErrorTrailers(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, err := io.ReadAll(r.Body)
@@ -183,6 +215,7 @@ func TestInvocation_StreamingPanicTrailer(t *testing.T) {
 	var panicErr *ErrorResponse
 	require.ErrorAs(t, streamErr, &panicErr)
 	assert.Equal(t, "stream panic", panicErr.Message)
+	assert.True(t, panicErr.fatal)
 }
 
 type oneShotErrorReader struct {
@@ -233,6 +266,24 @@ func TestInvocation_Failure(t *testing.T) {
 	err := inv.failure(errorPayload)
 	require.NoError(t, err)
 	assert.True(t, errorReceived)
+}
+
+func TestRuntimeClient_InitFailure(t *testing.T) {
+	errorPayload := []byte(`{"errorMessage":"setup failed","errorType":"Runtime.SetupError"}`)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, "/2018-06-01/runtime/init/error", r.URL.Path)
+		assert.Equal(t, http.MethodPost, r.Method)
+		assert.Equal(t, contentTypeJSON, r.Header.Get(headerContentType))
+		body, err := io.ReadAll(r.Body)
+		require.NoError(t, err)
+		assert.Equal(t, errorPayload, body)
+		w.WriteHeader(http.StatusAccepted)
+	}))
+	defer server.Close()
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	client := newRuntimeClient(server.Listener.Addr().String(), logger)
+	require.NoError(t, client.initFailure(errorPayload))
 }
 
 func TestRuntimeClient_Post_BadStatus(t *testing.T) {

@@ -55,9 +55,9 @@ func WithLogger(logger *slog.Logger) Option {
 	}
 }
 
-// WithTraceID enables or disables AWS X-Ray tracing.
-// When enabled, the X-Ray trace ID from Lambda headers will be
-// set in the _X_AMZN_TRACE_ID environment variable for each invocation.
+// WithTraceID enables or disables AWS X-Ray trace ID propagation. Propagation
+// is disabled by default. When enabled, the trace ID from Lambda headers is set
+// in _X_AMZN_TRACE_ID for each invocation.
 func WithTraceID(enabled bool) Option {
 	return func(o *options) {
 		o.enableTraceID = enabled
@@ -114,11 +114,15 @@ func start(handle func(*runtimeClient, *options) error, opts ...Option) {
 	}
 
 	done := make(chan struct{})
+	client := newRuntimeClient(runtimeAPI, options.logger)
 
 	if len(options.extensions) > 0 {
 		extMgr := newExtensionManager(runtimeAPI, options.extensions, options.logger)
 		if err := extMgr.start(); err != nil {
 			options.logger.Error("failed to start extensions", "error", err)
+			if reportErr := sendInitError(client, err); reportErr != nil {
+				options.logger.Error("failed to report initialization error", "error", reportErr)
+			}
 			os.Exit(1)
 		}
 
@@ -130,8 +134,6 @@ func start(handle func(*runtimeClient, *options) error, opts ...Option) {
 			close(done)
 		}()
 	}
-
-	client := newRuntimeClient(runtimeAPI, options.logger)
 
 	for {
 		select {
@@ -149,6 +151,17 @@ func start(handle func(*runtimeClient, *options) error, opts ...Option) {
 	}
 }
 
+func sendInitError(client *runtimeClient, err error) error {
+	errorJSON, marshalErr := json.Marshal(newErrorResponse(err))
+	if marshalErr != nil {
+		errorJSON = fmt.Appendf(nil, `{"errorMessage":"failed to marshal initialization error: %s","errorType":"Runtime.MarshalError"}`, marshalErr)
+	}
+	if postErr := client.initFailure(errorJSON); postErr != nil {
+		return fmt.Errorf("failed to send initialization error: %w", postErr)
+	}
+	return nil
+}
+
 func handleInvocation[TIn, TOut any](client *runtimeClient, handler func(context.Context, TIn) (TOut, error), options *options) error {
 	inv, err := client.next()
 	if err != nil {
@@ -156,9 +169,9 @@ func handleInvocation[TIn, TOut any](client *runtimeClient, handler func(context
 	}
 
 	if options.enableTraceID {
-		if traceID := inv.headers.Get(headerTraceID); traceID != "" {
-			os.Setenv("_X_AMZN_TRACE_ID", traceID)
-		}
+		// Set this on every invocation, including an empty value, so a missing
+		// header cannot leak the preceding invocation's trace ID.
+		_ = os.Setenv("_X_AMZN_TRACE_ID", inv.headers.Get(headerTraceID))
 	}
 
 	deadline, err := parseDeadline(inv.headers.Get(headerDeadlineMS))
@@ -200,6 +213,9 @@ func handleInvocation[TIn, TOut any](client *runtimeClient, handler func(context
 		}
 		if streamErr != nil {
 			options.logger.ErrorContext(ctx, "streaming invocation error", "error", streamErr)
+			if typed, ok := streamErr.(*ErrorResponse); ok && typed.fatal {
+				return errHandlerPanicked
+			}
 		}
 	} else if err := inv.success(response.payload); err != nil {
 		return fmt.Errorf("failed to send success response: %w", err)
@@ -299,7 +315,7 @@ func sendError(ctx context.Context, inv *invocation, err error, logger *slog.Log
 		return fmt.Errorf("failed to send error response: %w", err)
 	}
 
-	if len(errResp.StackTrace) > 0 {
+	if errResp.fatal {
 		return errHandlerPanicked
 	}
 

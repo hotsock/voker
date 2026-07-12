@@ -32,6 +32,16 @@ func TestNewErrorResponse_CustomType(t *testing.T) {
 	assert.Equal(t, "Runtime.customError", errResp.Type)
 }
 
+func TestNewErrorResponse_PreservesErrorResponse(t *testing.T) {
+	want := &ErrorResponse{
+		Type:       "Application.ValidationError",
+		Message:    "invalid input",
+		StackTrace: []StackFrame{{Path: "handler.go", Line: 42, Label: "handler"}},
+	}
+
+	assert.Same(t, want, newErrorResponse(want))
+}
+
 func TestNewPanicResponse(t *testing.T) {
 	panicValue := "panic message"
 	errResp := newPanicResponse(panicValue)
