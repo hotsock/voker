@@ -248,6 +248,11 @@ func decodeEventBody(body string, isBase64Encoded bool) ([]byte, error) {
 // set on resp.Header to match net/http servers, which apply
 // http.DetectContentType on the first Write. Callers must invoke this before
 // copying resp.Header into the Lambda response.
+//
+// A response with a non-identity Content-Encoding (e.g. gzip from a
+// compression middleware) carries bytes that are not the media type the
+// Content-Type describes, so it is always base64-encoded. Content sniffing
+// is skipped whenever Content-Encoding is set, matching net/http servers.
 func responseBody(resp *http.Response) (body string, isBase64Encoded bool, err error) {
 	defer resp.Body.Close()
 	bodyBytes, err := io.ReadAll(resp.Body)
@@ -258,8 +263,12 @@ func responseBody(resp *http.Response) (body string, isBase64Encoded bool, err e
 		return "", false, nil
 	}
 
+	if isEncodedContent(resp.Header) {
+		return base64.StdEncoding.EncodeToString(bodyBytes), true, nil
+	}
+
 	contentType := resp.Header.Get("Content-Type")
-	if contentType == "" {
+	if contentType == "" && len(resp.Header.Values("Content-Encoding")) == 0 {
 		contentType = http.DetectContentType(bodyBytes)
 		resp.Header.Set("Content-Type", contentType)
 	}
@@ -268,6 +277,23 @@ func responseBody(resp *http.Response) (body string, isBase64Encoded bool, err e
 		return string(bodyBytes), false, nil
 	}
 	return base64.StdEncoding.EncodeToString(bodyBytes), true, nil
+}
+
+// isEncodedContent reports whether the response headers declare a
+// non-identity Content-Encoding, meaning the body bytes are compressed (or
+// otherwise transformed) and cannot be carried as a plain JSON string
+// regardless of Content-Type. Content-Encoding may list multiple codings
+// (e.g. "gzip, br"); any non-identity coding makes the body binary.
+func isEncodedContent(header http.Header) bool {
+	for _, value := range header.Values("Content-Encoding") {
+		for coding := range strings.SplitSeq(value, ",") {
+			coding = strings.TrimSpace(strings.ToLower(coding))
+			if coding != "" && coding != "identity" {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // headerValue returns the first value for a header key, preferring

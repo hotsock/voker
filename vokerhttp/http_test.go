@@ -1,7 +1,10 @@
 package vokerhttp
 
 import (
+	"bytes"
+	"compress/gzip"
 	"context"
+	"encoding/base64"
 	"io"
 	"net/http"
 	"strings"
@@ -41,6 +44,137 @@ func TestIsTextContent(t *testing.T) {
 			assert.Equal(t, tt.want, isTextContent(tt.contentType))
 		})
 	}
+}
+
+func TestIsEncodedContent(t *testing.T) {
+	tests := []struct {
+		name   string
+		values []string
+		want   bool
+	}{
+		{"absent", nil, false},
+		{"gzip", []string{"gzip"}, true},
+		{"br", []string{"br"}, true},
+		{"zstd", []string{"zstd"}, true},
+		{"uppercase", []string{"GZIP"}, true},
+		{"identity", []string{"identity"}, false},
+		{"identity with spaces", []string{" identity "}, false},
+		{"multiple codings", []string{"gzip, br"}, true},
+		{"identity then gzip", []string{"identity, gzip"}, true},
+		{"multiple header lines", []string{"identity", "gzip"}, true},
+		{"empty value", []string{""}, false},
+		{"empty tokens", []string{", ,"}, false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			header := http.Header{}
+			for _, v := range tt.values {
+				header.Add("Content-Encoding", v)
+			}
+			assert.Equal(t, tt.want, isEncodedContent(header))
+		})
+	}
+}
+
+// TestResponseBody_ContentEncoding verifies that a non-identity
+// Content-Encoding forces base64 regardless of Content-Type: compressed
+// bytes are not the media type the Content-Type describes, and returning
+// them as a plain JSON string corrupts them.
+func TestResponseBody_ContentEncoding(t *testing.T) {
+	gzipBody := gzipCompress(t, `{"ok":true}`)
+
+	t.Run("gzip with text content type is base64", func(t *testing.T) {
+		resp := &http.Response{
+			StatusCode: http.StatusOK,
+			Header: http.Header{
+				"Content-Type":     []string{"application/json"},
+				"Content-Encoding": []string{"gzip"},
+			},
+			Body: io.NopCloser(bytes.NewReader(gzipBody)),
+		}
+
+		body, isBase64, err := responseBody(resp)
+		require.NoError(t, err)
+		assert.True(t, isBase64)
+
+		decoded, err := base64.StdEncoding.DecodeString(body)
+		require.NoError(t, err)
+		assert.Equal(t, gzipBody, decoded)
+	})
+
+	t.Run("identity with text content type stays plain", func(t *testing.T) {
+		resp := &http.Response{
+			StatusCode: http.StatusOK,
+			Header: http.Header{
+				"Content-Type":     []string{"application/json"},
+				"Content-Encoding": []string{"identity"},
+			},
+			Body: io.NopCloser(strings.NewReader(`{"ok":true}`)),
+		}
+
+		body, isBase64, err := responseBody(resp)
+		require.NoError(t, err)
+		assert.False(t, isBase64)
+		assert.Equal(t, `{"ok":true}`, body)
+	})
+
+	t.Run("content encoding disables sniffing", func(t *testing.T) {
+		// Match net/http servers: an explicit Content-Encoding means the body
+		// bytes don't reflect the media type, so no Content-Type is sniffed.
+		resp := &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Encoding": []string{"gzip"}},
+			Body:       io.NopCloser(bytes.NewReader(gzipBody)),
+		}
+
+		_, isBase64, err := responseBody(resp)
+		require.NoError(t, err)
+		assert.True(t, isBase64)
+		assert.Empty(t, resp.Header.Get("Content-Type"))
+	})
+}
+
+// TestEventHandler_GzipResponse is the end-to-end regression test for the
+// compression-middleware case: a handler that gzips its output while keeping
+// the original Content-Type must produce a base64 Lambda response.
+func TestEventHandler_GzipResponse(t *testing.T) {
+	const payload = `{"ok":true}`
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/my/path", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Content-Encoding", "gzip")
+		gz := gzip.NewWriter(w)
+		_, _ = gz.Write([]byte(payload))
+		require.NoError(t, gz.Close())
+	})
+
+	handler := eventHandler(mux, &FunctionURL{})
+	resp, err := handler(context.Background(), newTestFunctionURLRequest())
+	require.NoError(t, err)
+
+	require.True(t, resp.IsBase64Encoded)
+	assert.Equal(t, "application/json", resp.Headers["content-type"])
+	assert.Equal(t, "gzip", resp.Headers["content-encoding"])
+
+	compressed, err := base64.StdEncoding.DecodeString(resp.Body)
+	require.NoError(t, err)
+	gz, err := gzip.NewReader(bytes.NewReader(compressed))
+	require.NoError(t, err)
+	decompressed, err := io.ReadAll(gz)
+	require.NoError(t, err)
+	assert.Equal(t, payload, string(decompressed))
+}
+
+func gzipCompress(t *testing.T, s string) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	gz := gzip.NewWriter(&buf)
+	_, err := gz.Write([]byte(s))
+	require.NoError(t, err)
+	require.NoError(t, gz.Close())
+	return buf.Bytes()
 }
 
 // errAdapter is an Adapter whose Request always fails, used to exercise the
