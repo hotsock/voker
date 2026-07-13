@@ -9,7 +9,9 @@ import (
 )
 
 // InternalExtension represents an internal Lambda extension, as documented in
-// https://docs.aws.amazon.com/lambda/latest/dg/runtimes-extensions-api.html
+// https://docs.aws.amazon.com/lambda/latest/dg/runtimes-extensions-api.html.
+// Internal extensions are not supported on Lambda Managed Instances because
+// their invocation lifecycle events cannot represent concurrent invocations.
 type InternalExtension struct {
 	// Name is the extension identifier (required).
 	Name string

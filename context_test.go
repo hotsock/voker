@@ -11,6 +11,7 @@ func TestLambdaContext(t *testing.T) {
 	lc := &LambdaContext{
 		AwsRequestID:       "request-123",
 		InvokedFunctionArn: "arn:aws:lambda:us-east-1:123456789012:function:test",
+		TraceID:            "Root=1-test",
 		Identity: CognitoIdentity{
 			CognitoIdentityID:     "identity-456",
 			CognitoIdentityPoolID: "pool-789",
@@ -32,6 +33,7 @@ func TestLambdaContext(t *testing.T) {
 	assert.True(t, ok)
 	assert.Equal(t, lc.AwsRequestID, retrieved.AwsRequestID)
 	assert.Equal(t, lc.InvokedFunctionArn, retrieved.InvokedFunctionArn)
+	assert.Equal(t, lc.TraceID, retrieved.TraceID)
 	assert.Equal(t, lc.Identity.CognitoIdentityID, retrieved.Identity.CognitoIdentityID)
 	assert.Equal(t, lc.ClientContext.Client.InstallationID, retrieved.ClientContext.Client.InstallationID)
 	assert.Equal(t, "value", retrieved.ClientContext.Custom["key"])

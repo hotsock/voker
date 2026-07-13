@@ -13,7 +13,7 @@ import (
 )
 
 const (
-	vokerVersion = "0.9.0"
+	vokerVersion = "0.10.0"
 
 	runtimeAPIVersion = "2018-06-01"
 
@@ -70,7 +70,11 @@ type invocation struct {
 }
 
 func (c *runtimeClient) next() (*invocation, error) {
-	req, err := http.NewRequest(http.MethodGet, c.nextURL, nil)
+	return c.nextContext(context.Background())
+}
+
+func (c *runtimeClient) nextContext(ctx context.Context) (*invocation, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.nextURL, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
