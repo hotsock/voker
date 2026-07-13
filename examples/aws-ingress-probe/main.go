@@ -123,20 +123,20 @@ func main() {
 
 	switch adapter {
 	case "alb":
-		vokerhttp.StartHTTP(handler, &vokerhttp.ALB{MultiValueHeaders: true})
+		vokerhttp.Start(handler, &vokerhttp.ALB{MultiValueHeaders: true})
 	case "apigwv1":
 		if streaming {
-			vokerhttp.StartHTTPStreaming(handler, &vokerhttp.APIGatewayV1{})
+			vokerhttp.StartStreaming(handler, &vokerhttp.APIGatewayV1{})
 		} else {
-			vokerhttp.StartHTTP(handler, &vokerhttp.APIGatewayV1{})
+			vokerhttp.Start(handler, &vokerhttp.APIGatewayV1{})
 		}
 	case "apigwv2":
-		vokerhttp.StartHTTP(handler, &vokerhttp.APIGatewayV2{})
+		vokerhttp.Start(handler, &vokerhttp.APIGatewayV2{})
 	case "functionurl":
 		if streaming {
-			vokerhttp.StartHTTPStreaming(handler, &vokerhttp.FunctionURL{})
+			vokerhttp.StartStreaming(handler, &vokerhttp.FunctionURL{})
 		} else {
-			vokerhttp.StartHTTP(handler, &vokerhttp.FunctionURL{})
+			vokerhttp.Start(handler, &vokerhttp.FunctionURL{})
 		}
 	default:
 		panic(fmt.Sprintf("unknown VOKER_ADAPTER %q", adapter))

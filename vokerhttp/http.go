@@ -4,19 +4,19 @@
 //
 // Usage:
 //
-//	vokerhttp.StartHTTP(mux, &vokerhttp.FunctionURL{})
-//	vokerhttp.StartHTTP(mux, &vokerhttp.APIGatewayV2{})
-//	vokerhttp.StartHTTP(mux, &vokerhttp.APIGatewayV1{})
-//	vokerhttp.StartHTTP(mux, &vokerhttp.ALB{})
+//	vokerhttp.Start(mux, &vokerhttp.FunctionURL{})
+//	vokerhttp.Start(mux, &vokerhttp.APIGatewayV2{})
+//	vokerhttp.Start(mux, &vokerhttp.APIGatewayV1{})
+//	vokerhttp.Start(mux, &vokerhttp.ALB{})
 package vokerhttp
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"fmt"
 	"io"
 	"net/http"
-	"net/http/httptest"
 	"net/url"
 	"strings"
 
@@ -52,7 +52,7 @@ type StreamingAdapter[E any] interface {
 	StreamingResponseMetadata(statusCode int, header http.Header) StreamingResponseMetadata
 }
 
-// StartHTTP starts the Lambda runtime loop with a standard http.Handler
+// Start starts the Lambda runtime loop with a standard http.Handler
 // and an Adapter that handles event format conversion.
 //
 // The original Lambda event is stored on the request context and can be
@@ -64,13 +64,13 @@ type StreamingAdapter[E any] interface {
 //
 // Usage:
 //
-//	vokerhttp.StartHTTP(mux, &vokerhttp.FunctionURL{})
-//	vokerhttp.StartHTTP(mux, &vokerhttp.APIGatewayV2{}, voker.WithLogger(logger))
-func StartHTTP[E, R any](handler http.Handler, adapter Adapter[E, R], opts ...voker.Option) {
+//	vokerhttp.Start(mux, &vokerhttp.FunctionURL{})
+//	vokerhttp.Start(mux, &vokerhttp.APIGatewayV2{}, voker.WithLogger(logger))
+func Start[E, R any](handler http.Handler, adapter Adapter[E, R], opts ...voker.Option) {
 	voker.Start(eventHandler(handler, adapter), opts...)
 }
 
-// StartHTTPStreaming starts the Lambda runtime loop with a standard
+// StartStreaming starts the Lambda runtime loop with a standard
 // http.Handler and streams handler writes to Lambda as they occur. The
 // ResponseWriter passed to the handler implements [http.Flusher].
 //
@@ -81,14 +81,14 @@ func StartHTTP[E, R any](handler http.Handler, adapter Adapter[E, R], opts ...vo
 //
 // Usage:
 //
-//	vokerhttp.StartHTTPStreaming(mux, &vokerhttp.FunctionURL{})
-//	vokerhttp.StartHTTPStreaming(mux, &vokerhttp.APIGatewayV1{})
-func StartHTTPStreaming[E any](handler http.Handler, adapter StreamingAdapter[E], opts ...voker.Option) {
+//	vokerhttp.StartStreaming(mux, &vokerhttp.FunctionURL{})
+//	vokerhttp.StartStreaming(mux, &vokerhttp.APIGatewayV1{})
+func StartStreaming[E any](handler http.Handler, adapter StreamingAdapter[E], opts ...voker.Option) {
 	voker.Start(streamingEventHandler(handler, adapter), opts...)
 }
 
-// eventHandler builds the typed Lambda handler that StartHTTP passes to
-// [voker.Start]. It is kept separate from StartHTTP so the event-to-request
+// eventHandler builds the typed Lambda handler that Start passes to
+// [voker.Start]. It is kept separate from Start so the event-to-request
 // conversion, context propagation, and response conversion can be exercised
 // without running the blocking runtime loop.
 func eventHandler[E, R any](handler http.Handler, adapter Adapter[E, R]) func(context.Context, E) (R, error) {
@@ -101,16 +101,72 @@ func eventHandler[E, R any](handler http.Handler, adapter Adapter[E, R]) func(co
 
 		req = req.WithContext(context.WithValue(req.Context(), eventContextKey{}, event))
 
-		recorder := httptest.NewRecorder()
-		handler.ServeHTTP(recorder, req)
+		writer := newBufferedResponseWriter()
+		handler.ServeHTTP(writer, req)
 
-		response, err := adapter.Response(recorder.Result())
+		response, err := adapter.Response(writer.result())
 		if err != nil {
 			var zero R
 			return zero, fmt.Errorf("failed to build lambda response: %w", err)
 		}
 
 		return response, nil
+	}
+}
+
+// bufferedResponseWriter is a minimal http.ResponseWriter that buffers the
+// handler's response in memory for conversion into a buffered Lambda
+// response. It implements [http.Flusher] as a no-op so handlers that flush
+// work unchanged in buffered mode.
+type bufferedResponseWriter struct {
+	header      http.Header
+	body        bytes.Buffer
+	statusCode  int
+	wroteHeader bool
+}
+
+func newBufferedResponseWriter() *bufferedResponseWriter {
+	return &bufferedResponseWriter{header: make(http.Header)}
+}
+
+func (w *bufferedResponseWriter) Header() http.Header { return w.header }
+
+func (w *bufferedResponseWriter) WriteHeader(statusCode int) {
+	if w.wroteHeader {
+		return
+	}
+	if statusCode < 100 || statusCode > 999 {
+		panic(fmt.Sprintf("invalid WriteHeader code %v", statusCode))
+	}
+	// A buffered Lambda response has one final status code and cannot carry
+	// 1xx informational responses.
+	if statusCode >= 100 && statusCode <= 199 {
+		return
+	}
+	w.statusCode = statusCode
+	w.wroteHeader = true
+}
+
+func (w *bufferedResponseWriter) Write(p []byte) (int, error) {
+	if !w.wroteHeader {
+		w.WriteHeader(http.StatusOK)
+	}
+	return w.body.Write(p)
+}
+
+func (w *bufferedResponseWriter) Flush() {}
+
+// result snapshots the handler's output as an *http.Response for an
+// [Adapter.Response] call.
+func (w *bufferedResponseWriter) result() *http.Response {
+	statusCode := w.statusCode
+	if !w.wroteHeader {
+		statusCode = http.StatusOK
+	}
+	return &http.Response{
+		StatusCode: statusCode,
+		Header:     w.header,
+		Body:       io.NopCloser(bytes.NewReader(w.body.Bytes())),
 	}
 }
 

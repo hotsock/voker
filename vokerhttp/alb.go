@@ -12,7 +12,7 @@ import (
 // ALB implements [Adapter] for Application Load Balancer
 // Lambda target group events.
 //
-//	vokerhttp.StartHTTP(mux, &vokerhttp.ALB{})
+//	vokerhttp.Start(mux, &vokerhttp.ALB{})
 type ALB struct {
 	// MultiValueHeaders controls whether responses use the ALB
 	// multiValueHeaders format. Set this to true when the Lambda target group

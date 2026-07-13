@@ -8,18 +8,20 @@ import (
 // APIGatewayV2 implements [Adapter] for API Gateway v2 HTTP API events
 // (payload format 2.0).
 //
-//	vokerhttp.StartHTTP(mux, &vokerhttp.APIGatewayV2{})
+//	vokerhttp.Start(mux, &vokerhttp.APIGatewayV2{})
 type APIGatewayV2 struct{}
 
-// APIGatewayV2Request is the API Gateway v2 HTTP API event (payload format 2.0).
-type APIGatewayV2Request payloadV2Request
+// APIGatewayV2Request is the API Gateway v2 HTTP API event (payload format
+// 2.0). It shares the [PayloadV2Request] shape with Lambda Function URLs but
+// is a distinct type so [EventFromContext] can tell the event sources apart.
+type APIGatewayV2Request PayloadV2Request
 
 // APIGatewayV2Response is the API Gateway v2 HTTP API response (payload format 2.0).
-type APIGatewayV2Response payloadV2Response
+type APIGatewayV2Response PayloadV2Response
 
 // Request converts an API Gateway v2 event into an *http.Request.
 func (a *APIGatewayV2) Request(ctx context.Context, event APIGatewayV2Request) (*http.Request, error) {
-	return buildV2Request(ctx, payloadV2Request(event))
+	return buildV2Request(ctx, PayloadV2Request(event))
 }
 
 // Response converts the handler's *http.Response into an API Gateway v2 response.

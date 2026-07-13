@@ -55,6 +55,55 @@ Resources:
       Role: !GetAtt ProbeRole.Arn
       Environment: { Variables: { VOKER_PROBE_MODE: register-error } }
 
+  # Bypasses voker entirely: a hand-rolled Runtime API loop that echoes raw
+  # Lambda-Runtime-* headers, capturing ground-truth payloads for fixtures.
+  RawHeadersFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ./bin
+      Role: !GetAtt ProbeRole.Arn
+      Environment: { Variables: { VOKER_PROBE_MODE: raw-headers } }
+
+  # Identity pool with unauthenticated identities enabled. Invoking Lambda
+  # with credentials vended by this pool makes the Runtime API deliver the
+  # Lambda-Runtime-Cognito-Identity header.
+  ProbeIdentityPool:
+    Type: AWS::Cognito::IdentityPool
+    Properties:
+      AllowUnauthenticatedIdentities: true
+
+  ProbeUnauthRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Federated: cognito-identity.amazonaws.com }
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                cognito-identity.amazonaws.com:aud: !Ref ProbeIdentityPool
+              ForAnyValue:StringLike:
+                cognito-identity.amazonaws.com:amr: unauthenticated
+      Policies:
+        - PolicyName: invoke-probe-functions
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: lambda:InvokeFunction
+                Resource:
+                  - !GetAtt ProbeFunction.Arn
+                  - !GetAtt RawHeadersFunction.Arn
+
+  ProbeIdentityPoolRoles:
+    Type: AWS::Cognito::IdentityPoolRoleAttachment
+    Properties:
+      IdentityPoolId: !Ref ProbeIdentityPool
+      Roles:
+        unauthenticated: !GetAtt ProbeUnauthRole.Arn
+
   ProbeLogGroup:
     Type: AWS::Logs::LogGroup
     Properties:
@@ -74,6 +123,11 @@ Resources:
     Type: AWS::Logs::LogGroup
     Properties:
       LogGroupName: !Sub /aws/lambda/${RegisterErrorFunction}
+      RetentionInDays: 1
+  RawHeadersLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/${RawHeadersFunction}
       RetentionInDays: 1
 
   ProbeFunctionURL:
@@ -102,4 +156,7 @@ Outputs:
   InitErrorFunctionName: { Value: !Ref InitErrorFunction }
   InitPanicFunctionName: { Value: !Ref InitPanicFunction }
   RegisterErrorFunctionName: { Value: !Ref RegisterErrorFunction }
+  RawHeadersFunctionName: { Value: !Ref RawHeadersFunction }
+  ProbeIdentityPoolId: { Value: !Ref ProbeIdentityPool }
+  ProbeRoleArn: { Value: !GetAtt ProbeRole.Arn }
   ProbeFunctionURL: { Value: !GetAtt ProbeFunctionURL.FunctionUrl }

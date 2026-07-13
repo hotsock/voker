@@ -19,10 +19,15 @@ type ClientContext struct {
 	Custom map[string]string `json:"custom"`
 }
 
-// CognitoIdentity contains Cognito identity information
+// CognitoIdentity contains Cognito identity information.
+//
+// The JSON tags match the camelCase payload Lambda delivers in the
+// Lambda-Runtime-Cognito-Identity header, for example:
+//
+//	{"cognitoIdentityId":"...","cognitoIdentityPoolId":"..."}
 type CognitoIdentity struct {
-	CognitoIdentityID     string `json:"cognito_identity_id"`
-	CognitoIdentityPoolID string `json:"cognito_identity_pool_id"`
+	CognitoIdentityID     string `json:"cognitoIdentityId"`
+	CognitoIdentityPoolID string `json:"cognitoIdentityPoolId"`
 }
 
 // LambdaContext contains the metadata for a Lambda invocation
@@ -36,6 +41,11 @@ type LambdaContext struct {
 	// TraceID is the invocation-scoped AWS X-Ray trace header received from the
 	// Lambda Runtime API.
 	TraceID string
+
+	// TenantID is the tenant identifier for functions using Lambda tenant
+	// isolation mode. It is empty when the function does not use tenant
+	// isolation or the invocation carries no tenant ID.
+	TenantID string
 
 	// Identity contains Cognito identity information
 	Identity CognitoIdentity

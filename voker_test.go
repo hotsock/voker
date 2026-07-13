@@ -161,7 +161,7 @@ func TestHandleInvocation_StreamingPanicIsFatal(t *testing.T) {
 		case "/2018-06-01/runtime/invocation/stream-panic-request/response":
 			_, err := io.Copy(io.Discard, r.Body)
 			require.NoError(t, err)
-			assert.Equal(t, "Runtime.Panic.string", r.Trailer.Get(headerStreamErrorType))
+			assert.Equal(t, "Runtime.Panic.string", r.Trailer.Get(headerFunctionErrorType))
 			w.WriteHeader(http.StatusAccepted)
 		}
 	}))
@@ -372,8 +372,13 @@ func TestHandleInvocation_ContextMetadata(t *testing.T) {
 			w.Header().Set(headerDeadlineMS, "999999999999999")
 			w.Header().Set(headerFunctionARN, "arn:aws:lambda:us-west-2:123:function:foo")
 			w.Header().Set(headerTraceID, "Root=1-5e9c5b5f-1234567890abcdef")
-			w.Header().Set(headerCognitoIdentity, `{"cognito_identity_id":"id-123","cognito_identity_pool_id":"pool-456"}`)
-			w.Header().Set(headerClientContext, `{"client":{"installation_id":"install-789"},"custom":{"key":"value"}}`)
+			w.Header().Set(headerTenantID, "tenant-blue")
+			// Real Runtime API payloads captured live from Lambda
+			// (us-west-2, 2026-07-13) by examples/runtime-probe's raw-headers
+			// function: Cognito identity uses camelCase keys, client context
+			// uses the mobile SDK's snake_case client fields.
+			w.Header().Set(headerCognitoIdentity, `{"cognitoIdentityId":"us-west-2:d3f4d380-1d37-c31f-40af-e9e2dd41fd54","cognitoIdentityPoolId":"us-west-2:0958aa92-1810-4a32-8ae0-b07e1075a558"}`)
+			w.Header().Set(headerClientContext, `{"client":{"installation_id":"probe-install-1","app_title":"voker-probe","app_version_code":"1.0","app_package_name":"com.hotsock.voker.probe"},"env":{"platform":"probe"},"custom":{"probe":"cognito"}}`)
 			w.WriteHeader(http.StatusOK)
 			json.NewEncoder(w).Encode(testEvent{Name: "test"})
 
@@ -392,10 +397,15 @@ func TestHandleInvocation_ContextMetadata(t *testing.T) {
 
 		assert.Equal(t, "req-123", lc.AwsRequestID)
 		assert.Equal(t, "arn:aws:lambda:us-west-2:123:function:foo", lc.InvokedFunctionArn)
-		assert.Equal(t, "id-123", lc.Identity.CognitoIdentityID)
-		assert.Equal(t, "pool-456", lc.Identity.CognitoIdentityPoolID)
-		assert.Equal(t, "install-789", lc.ClientContext.Client.InstallationID)
-		assert.Equal(t, "value", lc.ClientContext.Custom["key"])
+		assert.Equal(t, "tenant-blue", lc.TenantID)
+		assert.Equal(t, "us-west-2:d3f4d380-1d37-c31f-40af-e9e2dd41fd54", lc.Identity.CognitoIdentityID)
+		assert.Equal(t, "us-west-2:0958aa92-1810-4a32-8ae0-b07e1075a558", lc.Identity.CognitoIdentityPoolID)
+		assert.Equal(t, "probe-install-1", lc.ClientContext.Client.InstallationID)
+		assert.Equal(t, "voker-probe", lc.ClientContext.Client.AppTitle)
+		assert.Equal(t, "1.0", lc.ClientContext.Client.AppVersionCode)
+		assert.Equal(t, "com.hotsock.voker.probe", lc.ClientContext.Client.AppPackageName)
+		assert.Equal(t, "probe", lc.ClientContext.Env["platform"])
+		assert.Equal(t, "cognito", lc.ClientContext.Custom["probe"])
 
 		// Check deadline
 		deadline, ok := ctx.Deadline()

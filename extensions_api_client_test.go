@@ -10,7 +10,7 @@ import (
 func TestExtensionAPIClient_Register(t *testing.T) {
 	extensionID := "test-extension-id-12345"
 	extensionName := "TestExtension"
-	requestedEvents := []extensionEventType{eventTypeInvoke}
+	requestedEvents := []ExtensionEventType{ExtensionEventInvoke}
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Verify request method and path
@@ -41,7 +41,7 @@ func TestExtensionAPIClient_Register(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := newExtensionAPIClient(server.Listener.Addr().String())
+	client := newExtensionAPIClient(server.Listener.Addr().String(), 1)
 	id, err := client.register(extensionName, requestedEvents)
 
 	if err != nil {
@@ -58,8 +58,8 @@ func TestExtensionAPIClient_Register_Error(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := newExtensionAPIClient(server.Listener.Addr().String())
-	_, err := client.register("TestExtension", []extensionEventType{eventTypeInvoke})
+	client := newExtensionAPIClient(server.Listener.Addr().String(), 1)
+	_, err := client.register("TestExtension", []ExtensionEventType{ExtensionEventInvoke})
 
 	if err == nil {
 		t.Fatal("expected error, got nil")
@@ -69,7 +69,7 @@ func TestExtensionAPIClient_Register_Error(t *testing.T) {
 func TestExtensionAPIClient_Next(t *testing.T) {
 	extensionID := "test-extension-id-12345"
 	expectedEvent := ExtensionEventPayload{
-		EventType:          eventTypeInvoke,
+		EventType:          ExtensionEventInvoke,
 		DeadlineMs:         1234567890,
 		RequestID:          "test-request-id",
 		InvokedFunctionArn: "arn:aws:lambda:us-east-1:123456789012:function:test",
@@ -95,7 +95,7 @@ func TestExtensionAPIClient_Next(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := newExtensionAPIClient(server.Listener.Addr().String())
+	client := newExtensionAPIClient(server.Listener.Addr().String(), 1)
 	event, err := client.next(extensionID)
 
 	if err != nil {
@@ -118,7 +118,7 @@ func TestExtensionAPIClient_Next_Error(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := newExtensionAPIClient(server.Listener.Addr().String())
+	client := newExtensionAPIClient(server.Listener.Addr().String(), 1)
 	_, err := client.next("test-id")
 
 	if err == nil {

@@ -14,11 +14,15 @@ const (
 	extensionAPIVersion       = "2020-01-01"
 )
 
-type extensionEventType string
+// ExtensionEventType identifies the kind of event delivered to an extension
+// by the Lambda Extensions API.
+type ExtensionEventType string
 
-const (
-	eventTypeInvoke extensionEventType = "INVOKE"
-)
+// ExtensionEventInvoke is delivered for each function invocation. It is the
+// only event type available to internal extensions: Lambda sends SHUTDOWN
+// events exclusively to external extensions, so voker exposes shutdown via
+// [InternalExtension.OnSIGTERM] instead.
+const ExtensionEventInvoke ExtensionEventType = "INVOKE"
 
 type extensionAPIClient struct {
 	baseURL     string
@@ -27,9 +31,13 @@ type extensionAPIClient struct {
 	httpClient  *http.Client
 }
 
-func newExtensionAPIClient(address string) *extensionAPIClient {
+// newExtensionAPIClient returns a client for the Extensions API.
+// maxIdleConnsPerHost should cover one long-poll connection per registered
+// extension.
+func newExtensionAPIClient(address string, maxIdleConnsPerHost int) *extensionAPIClient {
 	client := &http.Client{
-		Timeout: 0, // no timeout for Extensions API
+		Transport: newRuntimeTransport(max(maxIdleConnsPerHost, 1)),
+		Timeout:   0, // no timeout for Extensions API
 	}
 
 	baseURL := "http://" + address + "/" + extensionAPIVersion + "/extension/"
@@ -42,10 +50,10 @@ func newExtensionAPIClient(address string) *extensionAPIClient {
 }
 
 type registerRequest struct {
-	Events []extensionEventType `json:"events"`
+	Events []ExtensionEventType `json:"events"`
 }
 
-func (c *extensionAPIClient) register(name string, events []extensionEventType) (string, error) {
+func (c *extensionAPIClient) register(name string, events []ExtensionEventType) (string, error) {
 	body, err := json.Marshal(registerRequest{Events: events})
 	if err != nil {
 		return "", fmt.Errorf("failed to marshal register request: %w", err)
@@ -71,16 +79,22 @@ func (c *extensionAPIClient) register(name string, events []extensionEventType) 
 	return resp.Header.Get(headerExtensionIdentifier), nil
 }
 
+// ExtensionEventPayload is the event delivered to an extension's event loop
+// by the Lambda Extensions API and passed to [InternalExtension.OnInvoke].
 type ExtensionEventPayload struct {
-	EventType          extensionEventType `json:"eventType"`
+	EventType          ExtensionEventType `json:"eventType"`
 	DeadlineMs         int64              `json:"deadlineMs"`
 	ShutdownReason     string             `json:"shutdownReason,omitempty"`
 	RequestID          string             `json:"requestId,omitempty"`
 	InvokedFunctionArn string             `json:"invokedFunctionArn,omitempty"`
-	Tracing            struct {
-		Type  string `json:"type"`
-		Value string `json:"value"`
-	} `json:"tracing"`
+	Tracing            ExtensionTracing   `json:"tracing"`
+}
+
+// ExtensionTracing carries the X-Ray tracing header delivered with an
+// extension event.
+type ExtensionTracing struct {
+	Type  string `json:"type"`
+	Value string `json:"value"`
 }
 
 // next waits for the next extension event

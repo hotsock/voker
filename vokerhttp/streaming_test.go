@@ -155,6 +155,79 @@ func TestStreamingEventHandler_ErrorAfterCommit(t *testing.T) {
 	assert.Equal(t, "partial", string(partial))
 }
 
+// failingWriter fails every write, exercising commit's destination error paths.
+type failingWriter struct{}
+
+func (failingWriter) Write([]byte) (int, error) { return 0, io.ErrClosedPipe }
+
+// metadataOnlyFailingWriter fails after the first write so the metadata JSON
+// succeeds but the delimiter write fails.
+type metadataOnlyFailingWriter struct {
+	writes int
+}
+
+func (w *metadataOnlyFailingWriter) Write(p []byte) (int, error) {
+	w.writes++
+	if w.writes > 1 {
+		return 0, io.ErrClosedPipe
+	}
+	return len(p), nil
+}
+
+func TestStreamingResponseWriter_WriteHeaderValidation(t *testing.T) {
+	t.Run("invalid code panics", func(t *testing.T) {
+		w := newStreamingResponseWriter(&bytes.Buffer{}, (&FunctionURL{}).StreamingResponseMetadata)
+		assert.Panics(t, func() { w.WriteHeader(42) })
+		assert.Panics(t, func() { w.WriteHeader(1000) })
+	})
+
+	t.Run("1xx informational is dropped", func(t *testing.T) {
+		destination := &bytes.Buffer{}
+		w := newStreamingResponseWriter(destination, (&FunctionURL{}).StreamingResponseMetadata)
+		w.WriteHeader(http.StatusContinue)
+		assert.False(t, w.committed)
+
+		w.WriteHeader(http.StatusTeapot)
+		require.NoError(t, w.finish())
+		metadata, _ := decodeStreamingResponse(t, destination.Bytes())
+		assert.Equal(t, http.StatusTeapot, metadata.StatusCode)
+	})
+
+	t.Run("second WriteHeader is ignored", func(t *testing.T) {
+		destination := &bytes.Buffer{}
+		w := newStreamingResponseWriter(destination, (&FunctionURL{}).StreamingResponseMetadata)
+		w.WriteHeader(http.StatusCreated)
+		w.WriteHeader(http.StatusTeapot)
+		require.NoError(t, w.finish())
+		metadata, _ := decodeStreamingResponse(t, destination.Bytes())
+		assert.Equal(t, http.StatusCreated, metadata.StatusCode)
+	})
+}
+
+func TestStreamingResponseWriter_DestinationErrors(t *testing.T) {
+	t.Run("metadata write fails", func(t *testing.T) {
+		w := newStreamingResponseWriter(failingWriter{}, (&FunctionURL{}).StreamingResponseMetadata)
+		_, err := io.WriteString(w, "body")
+		assert.ErrorIs(t, err, io.ErrClosedPipe)
+		assert.ErrorIs(t, w.finish(), io.ErrClosedPipe)
+	})
+
+	t.Run("delimiter write fails", func(t *testing.T) {
+		w := newStreamingResponseWriter(&metadataOnlyFailingWriter{}, (&FunctionURL{}).StreamingResponseMetadata)
+		w.WriteHeader(http.StatusOK)
+		assert.ErrorIs(t, w.err, io.ErrClosedPipe)
+	})
+
+	t.Run("write after error keeps failing", func(t *testing.T) {
+		w := newStreamingResponseWriter(failingWriter{}, (&FunctionURL{}).StreamingResponseMetadata)
+		w.Flush()
+		n, err := w.Write([]byte("more"))
+		assert.Zero(t, n)
+		assert.ErrorIs(t, err, io.ErrClosedPipe)
+		assert.ErrorIs(t, w.FlushError(), io.ErrClosedPipe)
+	})
+}
+
 type streamingErrAdapter struct{}
 
 func (streamingErrAdapter) Request(context.Context, struct{}) (*http.Request, error) {

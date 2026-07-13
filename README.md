@@ -200,13 +200,13 @@ func handler(ctx context.Context, event MyEvent) (io.Reader, error) {
 }
 ```
 
-For `net/http` handlers, use `vokerhttp.StartHTTPStreaming`. Its response
+For `net/http` handlers, use `vokerhttp.StartStreaming`. Its response
 writer implements `http.Flusher` and preserves HTTP status, headers, repeated
 headers, and cookies in Lambda's streaming metadata prelude.
 
 ```go
-vokerhttp.StartHTTPStreaming(mux, &vokerhttp.FunctionURL{})
-vokerhttp.StartHTTPStreaming(mux, &vokerhttp.APIGatewayV1{})
+vokerhttp.StartStreaming(mux, &vokerhttp.FunctionURL{})
+vokerhttp.StartStreaming(mux, &vokerhttp.APIGatewayV1{})
 ```
 
 | Ingress                   | Buffered |                            Streaming |
@@ -284,12 +284,17 @@ The `LambdaContext` type contains metadata about the invocation:
 type LambdaContext struct {
     AwsRequestID       string          // Unique request ID
     InvokedFunctionArn string          // ARN of the invoked function
+    TraceID            string          // Invocation-scoped X-Ray trace header
+    TenantID           string          // Tenant ID (tenant isolation mode)
     Identity           CognitoIdentity // Cognito identity (if present)
     ClientContext      ClientContext   // Client context (if present)
 }
 ```
 
-Access it using `voker.FromContext(ctx)`.
+Access it using `voker.FromContext(ctx)`. `TenantID` carries the value of the
+`Lambda-Runtime-Aws-Tenant-Id` header for functions using [Lambda tenant
+isolation mode](https://docs.aws.amazon.com/lambda/latest/dg/tenant-isolation-context.html)
+and is empty otherwise.
 
 ## Logging
 
@@ -387,8 +392,26 @@ Voker automatically handles errors and panics:
 func handler(ctx context.Context, event MyEvent) (MyResponse, error) {
     return MyResponse{}, errors.New("something went wrong")
 }
-// Returns: {"errorMessage":"something went wrong","errorType":"errorString"}
+// Returns: {"errorMessage":"something went wrong","errorType":"HandlerError"}
 ```
+
+The reported `errorType` is the Go type name of the returned error, so a
+custom error type surfaces under its own name:
+
+```go
+type PaymentDeclinedError struct{ /* ... */ }
+
+func (e *PaymentDeclinedError) Error() string { return "payment declined" }
+
+// Returns: {"errorMessage":"payment declined","errorType":"PaymentDeclinedError"}
+```
+
+Errors with no meaningful type name — `errors.New`, `fmt.Errorf`,
+`errors.Join`, and anonymous types — report the stable name `HandlerError`.
+A `*voker.ErrorResponse` anywhere in the error chain (including wrapped with
+`fmt.Errorf("...: %w", err)`) is preserved verbatim, so use it when you need
+full control of the reported type. Voker also reports the error type in the
+`Lambda-Runtime-Function-Error-Type` header on Runtime API error posts.
 
 ### Panics
 
