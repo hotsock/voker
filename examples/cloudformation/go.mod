@@ -1,6 +1,6 @@
 module github.com/hotsock/voker/examples/cloudformation
 
-go 1.26.5
+go 1.26.0
 
 require github.com/hotsock/voker v0.0.0
 

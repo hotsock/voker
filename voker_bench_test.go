@@ -54,7 +54,8 @@ func BenchmarkHandleInvocation_WithMetadata(b *testing.B) {
 			w.Header().Set(headerDeadlineMS, "999999999999999")
 			w.Header().Set(headerFunctionARN, "arn:aws:lambda:us-east-1:123456789012:function:bench")
 			w.Header().Set(headerTraceID, "Root=1-5e9c5b5f-1234567890abcdef")
-			w.Header().Set(headerCognitoIdentity, `{"cognito_identity_id":"id-123","cognito_identity_pool_id":"pool-456"}`)
+			// Real payload shape captured live from Lambda by examples/runtime-probe.
+			w.Header().Set(headerCognitoIdentity, `{"cognitoIdentityId":"us-west-2:d3f4d380-1d37-c31f-40af-e9e2dd41fd54","cognitoIdentityPoolId":"us-west-2:0958aa92-1810-4a32-8ae0-b07e1075a558"}`)
 			w.Header().Set(headerClientContext, `{"client":{"installation_id":"install-789"},"custom":{"key":"value"}}`)
 			w.WriteHeader(http.StatusOK)
 			json.NewEncoder(w).Encode(testEvent{Name: "benchmark"})
@@ -150,12 +151,12 @@ func BenchmarkRuntimeClientPost(b *testing.B) {
 	client := newRuntimeClient(server.URL[7:], logger)
 	responseJSON, _ := json.Marshal(testResponse{Message: "hello"})
 
-	url := client.baseURL + "test-request-id" + responsePath
+	url := client.invocationURL("test-request-id", responsePath)
 
 	b.ReportAllocs()
 
 	for b.Loop() {
-		if err := client.post(context.Background(), url, responseJSON); err != nil {
+		if err := client.post(context.Background(), url, responseJSON, ""); err != nil {
 			b.Fatal(err)
 		}
 	}

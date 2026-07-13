@@ -17,5 +17,7 @@ jobs:
         with:
           go-version-file: go.mod
           check-latest: true
+      - run: go vet ./...
       - run: make test
+      - run: make examples
       - run: make -C examples/managed-instances test

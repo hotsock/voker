@@ -9,12 +9,12 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"runtime"
+	"runtime/debug"
 )
 
 const (
-	vokerVersion = "0.10.0"
-
 	runtimeAPIVersion = "2018-06-01"
 
 	contentTypeJSON = "application/json"
@@ -25,41 +25,96 @@ const (
 	headerCognitoIdentity = "Lambda-Runtime-Cognito-Identity"
 	headerClientContext   = "Lambda-Runtime-Client-Context"
 	headerFunctionARN     = "Lambda-Runtime-Invoked-Function-Arn"
+	headerTenantID        = "Lambda-Runtime-Aws-Tenant-Id"
 
 	headerUserAgent   = "User-Agent"
 	headerContentType = "Content-Type"
 
-	headerResponseMode    = "Lambda-Runtime-Function-Response-Mode"
-	headerStreamErrorType = "Lambda-Runtime-Function-Error-Type"
-	headerStreamErrorBody = "Lambda-Runtime-Function-Error-Body"
+	headerResponseMode = "Lambda-Runtime-Function-Response-Mode"
+
+	// headerFunctionErrorType carries the error's type both as a request
+	// header on Runtime API error endpoint POSTs and as a trailer on failed
+	// streaming responses.
+	headerFunctionErrorType = "Lambda-Runtime-Function-Error-Type"
+	headerStreamErrorBody   = "Lambda-Runtime-Function-Error-Body"
 )
 
-var userAgent = fmt.Sprintf("voker/%s go/%s", vokerVersion, runtime.Version())
+var userAgent = buildUserAgent()
 
-type runtimeClient struct {
-	baseURL    string
-	nextURL    string
-	initURL    string
-	httpClient *http.Client
-	logger     *slog.Logger
+// buildUserAgent resolves voker's module version from the binary's build
+// info so the User-Agent tracks the released version without a hardcoded
+// constant. Builds that replace the module with a local directory (or carry
+// no build info) report "devel".
+func buildUserAgent() string {
+	const modulePath = "github.com/hotsock/voker"
+	version := "devel"
+	if info, ok := debug.ReadBuildInfo(); ok {
+		if info.Main.Path == modulePath && info.Main.Version != "" {
+			version = info.Main.Version
+		} else {
+			for _, dep := range info.Deps {
+				if dep.Path != modulePath {
+					continue
+				}
+				if dep.Replace != nil {
+					if dep.Replace.Version != "" {
+						version = dep.Replace.Version
+					}
+				} else if dep.Version != "" {
+					version = dep.Version
+				}
+				break
+			}
+		}
+	}
+	return fmt.Sprintf("voker/%s go/%s", version, runtime.Version())
 }
 
-func newRuntimeClient(runtimeAPI string, logger *slog.Logger) *runtimeClient {
-	baseURL := fmt.Sprintf("http://%s/%s/runtime/invocation/", runtimeAPI, runtimeAPIVersion)
+// newRuntimeTransport returns the transport used for Runtime API and
+// Extensions API connections. The API is a local endpoint, so requests never
+// route through a proxy from HTTP_PROXY et al., and enough idle connections
+// are retained for every concurrent worker to keep its connection alive
+// between invocations (http.DefaultTransport would keep only two).
+func newRuntimeTransport(maxIdleConnsPerHost int) *http.Transport {
+	return &http.Transport{
+		Proxy:               nil,
+		MaxIdleConnsPerHost: maxIdleConnsPerHost,
+	}
+}
 
+type runtimeClient struct {
+	// host is the Runtime API host:port from AWS_LAMBDA_RUNTIME_API.
+	host string
+	// nextURL is pre-parsed once: GET /next runs on every invocation.
+	nextURL      *url.URL
+	initErrorURL *url.URL
+	httpClient   *http.Client
+	logger       *slog.Logger
+}
+
+const invocationPathPrefix = "/" + runtimeAPIVersion + "/runtime/invocation/"
+
+func newRuntimeClient(runtimeAPI string, logger *slog.Logger) *runtimeClient {
 	return &runtimeClient{
-		baseURL: baseURL,
-		nextURL: baseURL + "next",
-		initURL: fmt.Sprintf("http://%s/%s/runtime/init/error", runtimeAPI, runtimeAPIVersion),
+		host:         runtimeAPI,
+		nextURL:      &url.URL{Scheme: "http", Host: runtimeAPI, Path: invocationPathPrefix + "next"},
+		initErrorURL: &url.URL{Scheme: "http", Host: runtimeAPI, Path: "/" + runtimeAPIVersion + "/runtime/init/error"},
 		httpClient: &http.Client{
-			Timeout: 0, // No timeout for runtime API connections
+			Transport: newRuntimeTransport(MaxConcurrency()),
+			Timeout:   0, // No timeout for runtime API connections
 		},
 		logger: logger,
 	}
 }
 
-func (c *runtimeClient) initFailure(errorPayload []byte) error {
-	return c.post(context.Background(), c.initURL, errorPayload)
+// invocationURL builds an invocation-scoped Runtime API URL without a URL
+// parse. Request IDs are Lambda-issued identifiers that need no escaping.
+func (c *runtimeClient) invocationURL(requestID, suffix string) *url.URL {
+	return &url.URL{Scheme: "http", Host: c.host, Path: invocationPathPrefix + requestID + suffix}
+}
+
+func (c *runtimeClient) initFailure(errorPayload []byte, errorType string) error {
+	return c.post(context.Background(), c.initErrorURL, errorPayload, errorType)
 }
 
 type invocation struct {
@@ -74,11 +129,11 @@ func (c *runtimeClient) next() (*invocation, error) {
 }
 
 func (c *runtimeClient) nextContext(ctx context.Context) (*invocation, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.nextURL, nil)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create request: %w", err)
-	}
-	req.Header.Set(headerUserAgent, userAgent)
+	req := (&http.Request{
+		Method: http.MethodGet,
+		URL:    c.nextURL,
+		Header: http.Header{headerUserAgent: userAgentValue},
+	}).WithContext(ctx)
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
@@ -103,6 +158,10 @@ func (c *runtimeClient) nextContext(ctx context.Context) (*invocation, error) {
 	}, nil
 }
 
+// userAgentValue is the shared User-Agent header value. Requests only ever
+// read it, so it is safe to share across concurrent workers.
+var userAgentValue = []string{userAgent}
+
 func readBody(resp *http.Response) ([]byte, error) {
 	if resp.ContentLength < 0 {
 		return io.ReadAll(resp.Body)
@@ -118,13 +177,13 @@ func readBody(resp *http.Response) ([]byte, error) {
 const responsePath = "/response"
 
 func (inv *invocation) success(responsePayload []byte) error {
-	url := inv.client.baseURL + inv.requestID + responsePath
-	return inv.client.post(context.Background(), url, responsePayload)
+	url := inv.client.invocationURL(inv.requestID, responsePath)
+	return inv.client.post(context.Background(), url, responsePayload, "")
 }
 
 func (inv *invocation) successStreaming(ctx context.Context, reader io.Reader, contentType string) (streamErr error, responseErr error) {
 	body := &streamingRequestBody{reader: reader}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, inv.client.baseURL+inv.requestID+responsePath, body)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, inv.client.invocationURL(inv.requestID, responsePath).String(), body)
 	if err != nil {
 		return nil, err
 	}
@@ -137,8 +196,8 @@ func (inv *invocation) successStreaming(ctx context.Context, reader io.Reader, c
 	req.Header.Set(headerResponseMode, "streaming")
 	req.TransferEncoding = []string{"chunked"}
 	req.Trailer = http.Header{
-		headerStreamErrorType: nil,
-		headerStreamErrorBody: nil,
+		headerFunctionErrorType: nil,
+		headerStreamErrorBody:   nil,
 	}
 	body.trailer = req.Trailer
 	// Lambda requires the runtime to close the response connection after a
@@ -201,32 +260,43 @@ func (b *streamingRequestBody) Close() error {
 func (b *streamingRequestBody) setError(err error) {
 	b.streamErr = err
 	errorResponse := newErrorResponse(err)
-	if typed, ok := err.(*ErrorResponse); ok {
-		errorResponse = typed
-	}
 	errorJSON, marshalErr := json.Marshal(errorResponse)
 	if marshalErr != nil {
 		errorJSON = fmt.Appendf(nil, `{"errorMessage":"failed to marshal streaming error: %s","errorType":"Runtime.MarshalError"}`, marshalErr)
 	}
-	b.trailer.Set(headerStreamErrorType, errorResponse.Type)
+	b.trailer.Set(headerFunctionErrorType, errorResponse.Type)
 	b.trailer.Set(headerStreamErrorBody, base64.StdEncoding.EncodeToString(errorJSON))
 }
 
 const errorPath = "/error"
 
-func (inv *invocation) failure(errorPayload []byte) error {
-	url := inv.client.baseURL + inv.requestID + errorPath
-	return inv.client.post(context.Background(), url, errorPayload)
+func (inv *invocation) failure(errorPayload []byte, errorType string) error {
+	url := inv.client.invocationURL(inv.requestID, errorPath)
+	return inv.client.post(context.Background(), url, errorPayload, errorType)
 }
 
-func (c *runtimeClient) post(ctx context.Context, url string, body []byte) error {
-	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(body))
-	if err != nil {
-		return fmt.Errorf("failed to create POST request: %w", err)
+// post sends a JSON payload to the Runtime API. errorType, when non-empty,
+// is reported in the Lambda-Runtime-Function-Error-Type header on error
+// endpoint POSTs.
+func (c *runtimeClient) post(ctx context.Context, url *url.URL, body []byte, errorType string) error {
+	req := (&http.Request{
+		Method: http.MethodPost,
+		URL:    url,
+		Header: http.Header{
+			headerUserAgent:   userAgentValue,
+			headerContentType: contentTypeJSONValue,
+		},
+		Body:          io.NopCloser(bytes.NewReader(body)),
+		ContentLength: int64(len(body)),
+		// GetBody lets the transport safely retry the request on a stale
+		// reused connection, which matters after Lambda thaws the sandbox.
+		GetBody: func() (io.ReadCloser, error) {
+			return io.NopCloser(bytes.NewReader(body)), nil
+		},
+	}).WithContext(ctx)
+	if errorType != "" {
+		req.Header.Set(headerFunctionErrorType, errorType)
 	}
-
-	req.Header.Set(headerContentType, contentTypeJSON)
-	req.Header.Set(headerUserAgent, userAgent)
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
@@ -245,3 +315,7 @@ func (c *runtimeClient) post(ctx context.Context, url string, body []byte) error
 
 	return nil
 }
+
+// contentTypeJSONValue is the shared Content-Type header value for Runtime
+// API POSTs. Requests only ever read it.
+var contentTypeJSONValue = []string{contentTypeJSON}

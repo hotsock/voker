@@ -27,6 +27,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/hotsock/voker"
 )
@@ -706,31 +707,46 @@ const hexDigits = "0123456789abcdef"
 
 // appendJSONString writes s as a JSON string literal, escaping control
 // characters, quotes, and backslashes. '<', '>', and '&' are left unescaped,
-// and valid UTF-8 is copied verbatim.
+// and valid UTF-8 is copied verbatim. Invalid UTF-8 bytes are replaced with
+// U+FFFD, matching encoding/json, so the output is always valid JSON.
 func appendJSONString(b *buffer, s string) {
 	*b = append(*b, '"')
 	start := 0
-	for i := 0; i < len(s); i++ {
+	for i := 0; i < len(s); {
 		c := s[i]
-		if c >= 0x20 && c != '"' && c != '\\' {
+		if c < utf8.RuneSelf {
+			if c >= 0x20 && c != '"' && c != '\\' {
+				i++
+				continue
+			}
+			*b = append(*b, s[start:i]...)
+			switch c {
+			case '"':
+				*b = append(*b, '\\', '"')
+			case '\\':
+				*b = append(*b, '\\', '\\')
+			case '\n':
+				*b = append(*b, '\\', 'n')
+			case '\r':
+				*b = append(*b, '\\', 'r')
+			case '\t':
+				*b = append(*b, '\\', 't')
+			default:
+				*b = append(*b, '\\', 'u', '0', '0', hexDigits[c>>4], hexDigits[c&0xF])
+			}
+			i++
+			start = i
 			continue
 		}
-		*b = append(*b, s[start:i]...)
-		switch c {
-		case '"':
-			*b = append(*b, '\\', '"')
-		case '\\':
-			*b = append(*b, '\\', '\\')
-		case '\n':
-			*b = append(*b, '\\', 'n')
-		case '\r':
-			*b = append(*b, '\\', 'r')
-		case '\t':
-			*b = append(*b, '\\', 't')
-		default:
-			*b = append(*b, '\\', 'u', '0', '0', hexDigits[c>>4], hexDigits[c&0xF])
+		r, size := utf8.DecodeRuneInString(s[i:])
+		if r == utf8.RuneError && size == 1 {
+			*b = append(*b, s[start:i]...)
+			*b = append(*b, `�`...)
+			i++
+			start = i
+			continue
 		}
-		start = i + 1
+		i += size
 	}
 	*b = append(*b, s[start:]...)
 	*b = append(*b, '"')

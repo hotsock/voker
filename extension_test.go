@@ -159,7 +159,7 @@ func TestExtensionManager_Start_RegistersEvents(t *testing.T) {
 	tests := []struct {
 		name           string
 		extension      InternalExtension
-		expectedEvents []extensionEventType
+		expectedEvents []ExtensionEventType
 	}{
 		{
 			name: "OnInvoke only",
@@ -167,13 +167,13 @@ func TestExtensionManager_Start_RegistersEvents(t *testing.T) {
 				Name:     "InvokeOnly",
 				OnInvoke: func(ctx context.Context, eventPayload ExtensionEventPayload) {},
 			},
-			expectedEvents: []extensionEventType{eventTypeInvoke},
+			expectedEvents: []ExtensionEventType{ExtensionEventInvoke},
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			var receivedEvents []extensionEventType
+			var receivedEvents []ExtensionEventType
 			var mu sync.Mutex
 
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -252,7 +252,7 @@ func TestExtensionManager_EventLoop_OnInvoke(t *testing.T) {
 			if eventsSent == 1 {
 				// Send INVOKE event
 				event := ExtensionEventPayload{
-					EventType:  eventTypeInvoke,
+					EventType:  ExtensionEventInvoke,
 					DeadlineMs: time.Now().Add(time.Second).UnixMilli(),
 					RequestID:  "test-request-id",
 				}

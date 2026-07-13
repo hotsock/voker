@@ -1,6 +1,7 @@
 package voker
 
 import (
+	"errors"
 	"fmt"
 	"log/slog"
 	"reflect"
@@ -50,52 +51,51 @@ type StackFrame struct {
 	Label string `json:"label"`
 }
 
-// newErrorResponse creates an ErrorResponse from a regular error
+// newErrorResponse creates an ErrorResponse from a regular error. A wrapped
+// *ErrorResponse anywhere in the chain is preserved verbatim so its Type,
+// StackTrace, and fatality survive fmt.Errorf("...: %w", err) wrapping.
 func newErrorResponse(err error) *ErrorResponse {
-	if typed, ok := err.(*ErrorResponse); ok {
+	if typed, ok := errors.AsType[*ErrorResponse](err); ok {
 		return typed
 	}
 
-	errorType := getErrorType(err)
-
 	return &ErrorResponse{
 		Message: err.Error(),
-		Type:    errorType,
+		Type:    getErrorType(err),
 	}
 }
 
-// getErrorType returns the error type in AWS recommended format: Category.Reason
+// getErrorType returns the errorType reported for a handler error: the Go
+// type name of the error. Errors without a useful name — anonymous types and
+// the generic types produced by errors.New, fmt.Errorf, and errors.Join —
+// report the stable name HandlerError instead. Handlers that need a specific
+// errorType should return a *ErrorResponse.
 func getErrorType(err error) string {
 	if err == nil {
-		return "Runtime.Unknown"
+		return "HandlerError"
 	}
 
 	t := reflect.TypeOf(err)
 	if t == nil {
-		return "Runtime.Unknown"
+		return "HandlerError"
 	}
 
-	// Get the base type name
-	typeName := t.Name()
 	if t.Kind() == reflect.Pointer {
-		typeName = t.Elem().Name()
+		t = t.Elem()
 	}
 
-	// If we have a named type, use it with Runtime prefix
-	if typeName != "" {
-		// Handle standard library error types
-		if typeName == "errorString" || typeName == "errors" {
-			return "Runtime.HandlerError"
-		}
-		// Handle wrapped errors (fmt.wrapError, etc.)
-		if strings.Contains(typeName, "wrap") {
-			return "Runtime.HandlerError"
-		}
-		return "Runtime." + typeName
+	// The errors and fmt packages produce unexported generic types
+	// (errorString, wrapError, joinError, ...) whose names carry no meaning
+	// for users, so they collapse to HandlerError.
+	if t.PkgPath() == "errors" || t.PkgPath() == "fmt" {
+		return "HandlerError"
 	}
 
-	// Fallback for anonymous error types
-	return "Runtime.HandlerError"
+	if name := t.Name(); name != "" {
+		return name
+	}
+
+	return "HandlerError"
 }
 
 // newPanicResponse creates an ErrorResponse from a panic

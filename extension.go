@@ -12,6 +12,11 @@ import (
 // https://docs.aws.amazon.com/lambda/latest/dg/runtimes-extensions-api.html.
 // Internal extensions are not supported on Lambda Managed Instances because
 // their invocation lifecycle events cannot represent concurrent invocations.
+//
+// An OnInit failure is reported through the Runtime API's init/error endpoint
+// (the runtime process is failing initialization as a whole), not the
+// Extensions API's extension-scoped init/error endpoint, which is intended
+// for external extensions.
 type InternalExtension struct {
 	// Name is the extension identifier (required).
 	Name string
@@ -42,7 +47,7 @@ type extensionManager struct {
 func newExtensionManager(runtimeAPI string, extensions []InternalExtension, logger *slog.Logger) *extensionManager {
 	return &extensionManager{
 		extensions: extensions,
-		client:     newExtensionAPIClient(runtimeAPI),
+		client:     newExtensionAPIClient(runtimeAPI, len(extensions)),
 		done:       make(chan struct{}),
 		logger:     logger,
 	}
@@ -56,9 +61,9 @@ func (m *extensionManager) start() error {
 			}
 		}
 
-		var events []extensionEventType
+		var events []ExtensionEventType
 		if ext.OnInvoke != nil {
-			events = append(events, eventTypeInvoke)
+			events = append(events, ExtensionEventInvoke)
 		}
 
 		id, err := m.client.register(ext.Name, events)
@@ -103,6 +108,20 @@ func (m *extensionManager) shutdown() {
 	m.wg.Wait()
 }
 
+// callOnInvoke invokes an extension's OnInvoke callback with a context that
+// carries the event's deadline. The context is canceled as soon as the
+// callback returns so long-lived event loops release each invocation's
+// resources immediately.
+func callOnInvoke(ext InternalExtension, eventPayload *ExtensionEventPayload) {
+	ctx := context.Background()
+	if eventPayload.DeadlineMs > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithDeadline(ctx, time.UnixMilli(eventPayload.DeadlineMs))
+		defer cancel()
+	}
+	ext.OnInvoke(ctx, *eventPayload)
+}
+
 func (m *extensionManager) eventLoop(ext InternalExtension, id string) {
 	ctx := context.Background()
 
@@ -130,16 +149,9 @@ func (m *extensionManager) eventLoop(ext InternalExtension, id string) {
 			}
 
 			switch res.eventPayload.EventType {
-			case eventTypeInvoke:
+			case ExtensionEventInvoke:
 				if ext.OnInvoke != nil {
-					onInvokeCtx := context.Background()
-					if res.eventPayload.DeadlineMs > 0 {
-						deadline := time.UnixMilli(res.eventPayload.DeadlineMs)
-						var cancel context.CancelFunc
-						onInvokeCtx, cancel = context.WithDeadline(onInvokeCtx, deadline)
-						defer cancel()
-					}
-					ext.OnInvoke(onInvokeCtx, *res.eventPayload)
+					callOnInvoke(ext, res.eventPayload)
 				}
 			default:
 				// Log unknown event types but continue processing

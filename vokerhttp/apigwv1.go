@@ -11,7 +11,7 @@ import (
 // APIGatewayV1 implements [Adapter] for API Gateway v1 REST API
 // Lambda proxy integration events.
 //
-//	vokerhttp.StartHTTP(mux, &vokerhttp.APIGatewayV1{})
+//	vokerhttp.Start(mux, &vokerhttp.APIGatewayV1{})
 type APIGatewayV1 struct{}
 
 // APIGatewayV1Request is the API Gateway v1 REST API proxy integration event.

@@ -11,12 +11,12 @@ import (
 // FunctionURL implements [Adapter] for Lambda Function URL events
 // (payload format 2.0).
 //
-//	vokerhttp.StartHTTP(mux, &vokerhttp.FunctionURL{})
+//	vokerhttp.Start(mux, &vokerhttp.FunctionURL{})
 type FunctionURL struct{}
 
 // Request converts a Function URL event into an *http.Request.
 func (a *FunctionURL) Request(ctx context.Context, event FunctionURLRequest) (*http.Request, error) {
-	return buildV2Request(ctx, payloadV2Request(event))
+	return buildV2Request(ctx, PayloadV2Request(event))
 }
 
 // Response converts the handler's *http.Response into a Function URL response.
@@ -44,14 +44,16 @@ func (a *FunctionURL) StreamingResponseMetadata(statusCode int, header http.Head
 }
 
 // FunctionURLRequest is the Lambda Function URL event (payload format 2.0).
-type FunctionURLRequest payloadV2Request
+// It shares the [PayloadV2Request] shape with API Gateway v2 HTTP APIs but is
+// a distinct type so [EventFromContext] can tell the event sources apart.
+type FunctionURLRequest PayloadV2Request
 
 // FunctionURLResponse is the Lambda Function URL response (payload format 2.0).
-type FunctionURLResponse payloadV2Response
+type FunctionURLResponse PayloadV2Response
 
-// payloadV2Request is the shared event shape for payload format 2.0,
+// PayloadV2Request is the shared event shape for payload format 2.0,
 // used by both Lambda Function URLs and API Gateway v2 HTTP APIs.
-type payloadV2Request struct {
+type PayloadV2Request struct {
 	Version               string                  `json:"version"`
 	RouteKey              string                  `json:"routeKey"`
 	RawPath               string                  `json:"rawPath"`
@@ -141,8 +143,9 @@ type PayloadV2ClientCertValidity struct {
 	NotAfter  string `json:"notAfter"`
 }
 
-// payloadV2Response is the shared response shape for payload format 2.0.
-type payloadV2Response struct {
+// PayloadV2Response is the shared response shape for payload format 2.0,
+// used by both Lambda Function URLs and API Gateway v2 HTTP APIs.
+type PayloadV2Response struct {
 	StatusCode      int               `json:"statusCode"`
 	Headers         map[string]string `json:"headers,omitempty"`
 	Body            string            `json:"body"`
@@ -150,7 +153,7 @@ type payloadV2Response struct {
 	IsBase64Encoded bool              `json:"isBase64Encoded"`
 }
 
-func buildV2Request(ctx context.Context, event payloadV2Request) (*http.Request, error) {
+func buildV2Request(ctx context.Context, event PayloadV2Request) (*http.Request, error) {
 	body, err := decodeEventBody(event.Body, event.IsBase64Encoded)
 	if err != nil {
 		return nil, err
@@ -194,8 +197,8 @@ func buildV2Request(ctx context.Context, event payloadV2Request) (*http.Request,
 	return req, nil
 }
 
-func buildV2Response(resp *http.Response) (payloadV2Response, error) {
-	out := payloadV2Response{
+func buildV2Response(resp *http.Response) (PayloadV2Response, error) {
+	out := PayloadV2Response{
 		StatusCode: resp.StatusCode,
 	}
 	// Encode the body first: responseBody may set a sniffed Content-Type on
@@ -203,7 +206,7 @@ func buildV2Response(resp *http.Response) (payloadV2Response, error) {
 	var err error
 	out.Body, out.IsBase64Encoded, err = responseBody(resp)
 	if err != nil {
-		return payloadV2Response{}, err
+		return PayloadV2Response{}, err
 	}
 
 	// Flatten headers, separating Set-Cookie into the cookies array

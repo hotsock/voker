@@ -94,7 +94,11 @@ func WithLogger(logger *slog.Logger) Option {
 // state it accesses must therefore be safe for concurrent use. Every handler
 // call receives independent Lambda metadata and deadline cancellation.
 //
-// This function blocks indefinitely and only returns if a fatal error occurs.
+// This function blocks indefinitely. On a fatal error (missing or failed
+// Runtime API, invalid configuration, or a handler panic) it reports the
+// error and terminates the process with os.Exit(1). It returns only when the
+// runtime shuts down gracefully after Lambda sends SIGTERM to a process with
+// registered internal extensions.
 func Start[TIn, TOut any](handler func(context.Context, TIn) (TOut, error), opts ...Option) {
 	start(func(ctx context.Context, client *runtimeClient, options *options) error {
 		return handleInvocationContext(ctx, client, handler, options)
@@ -218,11 +222,12 @@ func runInvocationWorkers(
 }
 
 func sendInitError(client *runtimeClient, err error) error {
-	errorJSON, marshalErr := json.Marshal(newErrorResponse(err))
+	errResp := newErrorResponse(err)
+	errorJSON, marshalErr := json.Marshal(errResp)
 	if marshalErr != nil {
 		errorJSON = fmt.Appendf(nil, `{"errorMessage":"failed to marshal initialization error: %s","errorType":"Runtime.MarshalError"}`, marshalErr)
 	}
-	if postErr := client.initFailure(errorJSON); postErr != nil {
+	if postErr := client.initFailure(errorJSON, errResp.Type); postErr != nil {
 		return fmt.Errorf("failed to send initialization error: %w", postErr)
 	}
 	return nil
@@ -252,6 +257,7 @@ func handleInvocationContext[TIn, TOut any](workerCtx context.Context, client *r
 		AwsRequestID:       inv.requestID,
 		InvokedFunctionArn: inv.headers.Get(headerFunctionARN),
 		TraceID:            traceID,
+		TenantID:           inv.headers.Get(headerTenantID),
 	}
 
 	if cognitoJSON := inv.headers.Get(headerCognitoIdentity); cognitoJSON != "" {
@@ -333,15 +339,18 @@ func callHandler[TIn, TOut any](ctx context.Context, payload []byte, handler fun
 		return handlerResponse{}, newErrorResponse(err)
 	}
 
-	if stream, ok := any(output).(io.Reader); ok {
+	// Box the generic output once and reuse the interface value for the
+	// streaming checks and JSON marshaling below.
+	boxed := any(output)
+	if stream, ok := boxed.(io.Reader); ok {
 		contentType := "application/octet-stream"
-		if typed, ok := any(output).(interface{ ContentType() string }); ok {
+		if typed, ok := stream.(interface{ ContentType() string }); ok {
 			contentType = typed.ContentType()
 		}
 		return handlerResponse{stream: stream, contentType: contentType}, nil
 	}
 
-	responseBytes, err := json.Marshal(output)
+	responseBytes, err := json.Marshal(boxed)
 	if err != nil {
 		return handlerResponse{}, &ErrorResponse{
 			Message: fmt.Sprintf("failed to marshal output: %v", err),
@@ -353,18 +362,12 @@ func callHandler[TIn, TOut any](ctx context.Context, payload []byte, handler fun
 }
 
 func sendError(ctx context.Context, inv *invocation, err error, logger *slog.Logger) error {
-	var errResp *ErrorResponse
-
-	if e, ok := err.(*ErrorResponse); ok {
-		errResp = e
-	} else {
-		errResp = newErrorResponse(err)
-	}
+	errResp := newErrorResponse(err)
 
 	errorJSON, marshalErr := json.Marshal(errResp)
 	if marshalErr != nil {
 		// If we can't marshal the error, create a simple error
-		errorJSON = fmt.Appendf(nil, `{"message":"failed to marshal error: %s","type":"Runtime.MarshalError"}`, marshalErr.Error())
+		errorJSON = fmt.Appendf(nil, `{"errorMessage":"failed to marshal error: %s","errorType":"Runtime.MarshalError"}`, marshalErr.Error())
 	}
 
 	logger.ErrorContext(
@@ -378,7 +381,7 @@ func sendError(ctx context.Context, inv *invocation, err error, logger *slog.Log
 		),
 	)
 
-	if err := inv.failure(errorJSON); err != nil {
+	if err := inv.failure(errorJSON, errResp.Type); err != nil {
 		return fmt.Errorf("failed to send error response: %w", err)
 	}
 

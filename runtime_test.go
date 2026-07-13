@@ -109,7 +109,7 @@ func TestInvocation_SuccessStreaming(t *testing.T) {
 		rest, err := io.ReadAll(r.Body)
 		require.NoError(t, err)
 		assert.Equal(t, "second", string(rest))
-		assert.Empty(t, r.Trailer.Get(headerStreamErrorType))
+		assert.Empty(t, r.Trailer.Get(headerFunctionErrorType))
 		w.WriteHeader(http.StatusAccepted)
 	}))
 	defer server.Close()
@@ -175,7 +175,7 @@ func TestInvocation_StreamingErrorTrailers(t *testing.T) {
 		body, err := io.ReadAll(r.Body)
 		require.NoError(t, err)
 		assert.Equal(t, "partial", string(body))
-		assert.Equal(t, "Runtime.HandlerError", r.Trailer.Get(headerStreamErrorType))
+		assert.Equal(t, "HandlerError", r.Trailer.Get(headerFunctionErrorType))
 
 		encoded := r.Trailer.Get(headerStreamErrorBody)
 		decoded, err := base64.StdEncoding.DecodeString(encoded)
@@ -201,7 +201,7 @@ func TestInvocation_StreamingPanicTrailer(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, err := io.Copy(io.Discard, r.Body)
 		require.NoError(t, err)
-		assert.Equal(t, "Runtime.Panic.string", r.Trailer.Get(headerStreamErrorType))
+		assert.Equal(t, "Runtime.Panic.string", r.Trailer.Get(headerFunctionErrorType))
 		w.WriteHeader(http.StatusAccepted)
 	}))
 	defer server.Close()
@@ -246,6 +246,7 @@ func TestInvocation_Failure(t *testing.T) {
 		assert.Equal(t, "/2018-06-01/runtime/invocation/req-456/error", r.URL.Path)
 		assert.Equal(t, http.MethodPost, r.Method)
 		assert.Equal(t, contentTypeJSON, r.Header.Get("Content-Type"))
+		assert.Equal(t, "Application.TestError", r.Header.Get(headerFunctionErrorType))
 
 		body, err := io.ReadAll(r.Body)
 		require.NoError(t, err)
@@ -263,7 +264,7 @@ func TestInvocation_Failure(t *testing.T) {
 		client:    client,
 	}
 
-	err := inv.failure(errorPayload)
+	err := inv.failure(errorPayload, "Application.TestError")
 	require.NoError(t, err)
 	assert.True(t, errorReceived)
 }
@@ -274,6 +275,7 @@ func TestRuntimeClient_InitFailure(t *testing.T) {
 		assert.Equal(t, "/2018-06-01/runtime/init/error", r.URL.Path)
 		assert.Equal(t, http.MethodPost, r.Method)
 		assert.Equal(t, contentTypeJSON, r.Header.Get(headerContentType))
+		assert.Equal(t, "Runtime.SetupError", r.Header.Get(headerFunctionErrorType))
 		body, err := io.ReadAll(r.Body)
 		require.NoError(t, err)
 		assert.Equal(t, errorPayload, body)
@@ -283,7 +285,7 @@ func TestRuntimeClient_InitFailure(t *testing.T) {
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	client := newRuntimeClient(server.Listener.Addr().String(), logger)
-	require.NoError(t, client.initFailure(errorPayload))
+	require.NoError(t, client.initFailure(errorPayload, "Runtime.SetupError"))
 }
 
 func TestRuntimeClient_Post_BadStatus(t *testing.T) {
@@ -294,7 +296,7 @@ func TestRuntimeClient_Post_BadStatus(t *testing.T) {
 
 	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
 	client := newRuntimeClient(server.URL[7:], logger)
-	err := client.post(context.Background(), client.baseURL+"test/response", []byte("{}"))
+	err := client.post(context.Background(), client.invocationURL("test", responsePath), []byte("{}"), "")
 
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "unexpected status code")

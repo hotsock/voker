@@ -7,7 +7,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
+	"net/http"
 	"os"
+	"strings"
 
 	"github.com/hotsock/voker"
 	"github.com/hotsock/voker/vokerhttp"
@@ -113,6 +116,20 @@ func handler(ctx context.Context, raw json.RawMessage) (any, error) {
 	}
 
 	switch action {
+	case "echo-context":
+		lc, ok := voker.FromContext(ctx)
+		if !ok {
+			return nil, errors.New("missing Lambda context")
+		}
+		return map[string]any{
+			"requestId":          lc.AwsRequestID,
+			"invokedFunctionArn": lc.InvokedFunctionArn,
+			"traceId":            lc.TraceID,
+			"tenantId":           lc.TenantID,
+			"identity":           lc.Identity,
+			"clientContext":      lc.ClientContext,
+			"maxConcurrency":     voker.MaxConcurrency(),
+		}, nil
 	case "custom-error":
 		return nil, &voker.ErrorResponse{
 			Type:    "Application.CustomError",
@@ -146,9 +163,61 @@ func handler(ctx context.Context, raw json.RawMessage) (any, error) {
 	}
 }
 
+// rawHeaderLoop is a minimal hand-rolled Runtime API loop that echoes every
+// Lambda-Runtime-* header verbatim. It captures ground-truth Runtime API
+// payloads (Cognito identity, client context, tenant ID) for voker's test
+// fixtures without any voker parsing in between.
+func rawHeaderLoop() {
+	api := os.Getenv("AWS_LAMBDA_RUNTIME_API")
+	client := &http.Client{}
+
+	for {
+		resp, err := client.Get("http://" + api + "/2018-06-01/runtime/invocation/next")
+		if err != nil {
+			log.Fatalf("next: %v", err)
+		}
+
+		requestID := resp.Header.Get("Lambda-Runtime-Aws-Request-Id")
+		headers := map[string][]string{}
+		for name, values := range resp.Header {
+			if strings.HasPrefix(strings.ToLower(name), "lambda-runtime-") {
+				headers[name] = values
+			}
+		}
+		payload, err := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if err != nil {
+			log.Fatalf("read payload: %v", err)
+		}
+
+		response, err := json.Marshal(map[string]any{
+			"headers": headers,
+			"payload": string(payload),
+		})
+		if err != nil {
+			log.Fatalf("marshal response: %v", err)
+		}
+		fmt.Fprintf(os.Stderr, "VOKER_PROBE raw_headers %s\n", response)
+
+		postResp, err := client.Post(
+			"http://"+api+"/2018-06-01/runtime/invocation/"+requestID+"/response",
+			"application/json",
+			bytes.NewReader(response),
+		)
+		if err != nil {
+			log.Fatalf("respond: %v", err)
+		}
+		_, _ = io.Copy(io.Discard, postResp.Body)
+		postResp.Body.Close()
+	}
+}
+
 func main() {
 	var options []voker.Option
 	switch os.Getenv("VOKER_PROBE_MODE") {
+	case "raw-headers":
+		rawHeaderLoop()
+		return
 	case "init-error":
 		options = append(options, voker.WithInternalExtension(voker.InternalExtension{
 			Name: "InitErrorProbe",
