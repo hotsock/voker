@@ -409,7 +409,7 @@ func TestHandleInvocation_ContextMetadata(t *testing.T) {
 	require.NoError(t, err)
 }
 
-func TestHandleInvocation_WithXRayTrace(t *testing.T) {
+func TestHandleInvocation_WithTraceContext(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/2018-06-01/runtime/invocation/next":
@@ -429,54 +429,15 @@ func TestHandleInvocation_WithXRayTrace(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
 	client := newRuntimeClient(server.URL[7:], logger)
 
-	os.Unsetenv("_X_AMZN_TRACE_ID")
-
 	handler := func(ctx context.Context, event testEvent) (testResponse, error) {
-		traceID := os.Getenv("_X_AMZN_TRACE_ID")
-		assert.Equal(t, "Root=1-5e9c5b5f-1234567890abcdef", traceID)
+		lc, ok := FromContext(ctx)
+		require.True(t, ok)
+		assert.Equal(t, "Root=1-5e9c5b5f-1234567890abcdef", lc.TraceID)
 		return testResponse{Message: "ok"}, nil
 	}
 
-	// Test with tracing enabled
-	err := handleInvocation(client, handler, &options{enableTraceID: true, logger: logger})
+	err := handleInvocation(client, handler, &options{logger: logger})
 	require.NoError(t, err)
-
-	// Test with tracing disabled - clear the env var first
-	os.Unsetenv("_X_AMZN_TRACE_ID")
-
-	handlerNoXRay := func(ctx context.Context, event testEvent) (testResponse, error) {
-		traceID := os.Getenv("_X_AMZN_TRACE_ID")
-		assert.Equal(t, "", traceID)
-		return testResponse{Message: "ok"}, nil
-	}
-
-	err = handleInvocation(client, handlerNoXRay, &options{enableTraceID: false, logger: logger})
-	require.NoError(t, err)
-}
-
-func TestHandleInvocation_ClearsStaleXRayTrace(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Path {
-		case "/2018-06-01/runtime/invocation/next":
-			w.Header().Set(headerRequestID, "req-without-trace")
-			w.Header().Set(headerDeadlineMS, "999999999999999")
-			w.WriteHeader(http.StatusOK)
-			_ = json.NewEncoder(w).Encode(testEvent{Name: "test"})
-		case "/2018-06-01/runtime/invocation/req-without-trace/response":
-			w.WriteHeader(http.StatusAccepted)
-		}
-	}))
-	defer server.Close()
-
-	t.Setenv("_X_AMZN_TRACE_ID", "stale-trace-id")
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	client := newRuntimeClient(server.Listener.Addr().String(), logger)
-	handler := func(context.Context, testEvent) (testResponse, error) {
-		assert.Empty(t, os.Getenv("_X_AMZN_TRACE_ID"))
-		return testResponse{Message: "ok"}, nil
-	}
-
-	require.NoError(t, handleInvocation(client, handler, &options{enableTraceID: true, logger: logger}))
 }
 
 func TestParseDeadline(t *testing.T) {

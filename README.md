@@ -51,6 +51,7 @@ func handler(ctx context.Context, event MyEvent) (MyResponse, error) {
     if ok {
         log.Printf("Request ID: %s", lc.AwsRequestID)
         log.Printf("Function ARN: %s", lc.InvokedFunctionArn)
+        log.Printf("X-Ray trace ID: %s", lc.TraceID)
     }
 
     deadline, _ := ctx.Deadline()
@@ -125,6 +126,34 @@ Where:
 - `TIn` is your input type (must be JSON-deserializable)
 - `TOut` is your output type (JSON-serializable, or an `io.Reader` for streaming)
 - `error` is required for error handling
+
+### Lambda Managed Instances
+
+Voker automatically supports Lambda Managed Instances. At startup it reads
+`AWS_LAMBDA_MAX_CONCURRENCY` and starts that many Runtime API workers; when the
+variable is missing or invalid it preserves standard Lambda's serial behavior.
+`voker.MaxConcurrency()` returns the effective worker count.
+
+Managed Instances can call the same handler concurrently within one process.
+Handlers must protect mutable globals and shared caches, coordinate access to
+shared `/tmp` paths, and use clients that permit concurrent calls. Each handler
+receives an independent context, deadline, request ID, and `LambdaContext.TraceID`.
+Handlers use `LambdaContext.TraceID` in both standard Lambda and Managed
+Instances, keeping trace propagation invocation-scoped.
+
+Lambda does not forcibly stop timed-out Managed Instances handlers. Watch
+`ctx.Done()` and leave enough deadline margin to stop the next unit of work
+before performing further side effects. Managed Instances also require JSON
+logging; Voker's default logger honors Lambda's `AWS_LAMBDA_LOG_FORMAT=JSON`
+setting. A logger supplied through `WithLogger` must likewise emit JSON.
+
+Internal extensions are rejected during Managed Instances initialization
+because the Extensions API does not support invocation events in that compute
+mode. Use the Telemetry API's platform events when invocation reporting is
+needed.
+
+See [`examples/managed-instances`](examples/managed-instances/README.md) for a
+self-contained SAM stack and live concurrency probe.
 
 ### Raw payloads
 

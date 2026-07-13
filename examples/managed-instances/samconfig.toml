@@ -1,0 +1,10 @@
+version = 0.1
+
+[default.deploy.parameters]
+stack_name = "voker-managed-instances"
+resolve_s3 = true
+s3_prefix = "voker-managed-instances"
+capabilities = "CAPABILITY_IAM"
+confirm_changeset = true
+image_repositories = []
+template = ".aws-sam/build/template.yaml"

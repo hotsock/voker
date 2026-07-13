@@ -24,16 +24,28 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
+	"sync"
 	"syscall"
 	"time"
 )
 
-var errHandlerPanicked = errors.New("handler panicked")
+var (
+	errHandlerPanicked = errors.New("handler panicked")
+	errRuntimeShutdown = errors.New("runtime shutdown")
+)
+
+const (
+	lambdaEnvMaxConcurrency     = "AWS_LAMBDA_MAX_CONCURRENCY"
+	lambdaEnvInitializationType = "AWS_LAMBDA_INITIALIZATION_TYPE"
+	managedInstancesInitType    = "lambda-managed-instances"
+)
+
+var configuredMaxConcurrency = parseMaxConcurrency(os.Getenv(lambdaEnvMaxConcurrency))
 
 type options struct {
-	enableTraceID bool
-	extensions    []InternalExtension
-	logger        *slog.Logger
+	extensions     []InternalExtension
+	logger         *slog.Logger
+	maxConcurrency int
 }
 
 // Option is a function that modifies Options.
@@ -52,15 +64,6 @@ func WithInternalExtension(ext InternalExtension) Option {
 func WithLogger(logger *slog.Logger) Option {
 	return func(o *options) {
 		o.logger = logger
-	}
-}
-
-// WithTraceID enables or disables AWS X-Ray trace ID propagation. Propagation
-// is disabled by default. When enabled, the trace ID from Lambda headers is set
-// in _X_AMZN_TRACE_ID for each invocation.
-func WithTraceID(enabled bool) Option {
-	return func(o *options) {
-		o.enableTraceID = enabled
 	}
 }
 
@@ -86,18 +89,19 @@ func WithTraceID(enabled bool) Option {
 // responsible for decoding them. This is useful for handlers that work with
 // large payloads and want to measure or control their own decoding.
 //
-// Options can be provided to configure runtime behavior:
-//
-//	voker.Start(handler, voker.WithTraceID(true))
+// On Lambda Managed Instances, AWS_LAMBDA_MAX_CONCURRENCY controls how many
+// invocations call handler concurrently. The handler and all process-wide
+// state it accesses must therefore be safe for concurrent use. Every handler
+// call receives independent Lambda metadata and deadline cancellation.
 //
 // This function blocks indefinitely and only returns if a fatal error occurs.
 func Start[TIn, TOut any](handler func(context.Context, TIn) (TOut, error), opts ...Option) {
-	start(func(client *runtimeClient, options *options) error {
-		return handleInvocation(client, handler, options)
+	start(func(ctx context.Context, client *runtimeClient, options *options) error {
+		return handleInvocationContext(ctx, client, handler, options)
 	}, opts...)
 }
 
-func start(handle func(*runtimeClient, *options) error, opts ...Option) {
+func start(handle func(context.Context, *runtimeClient, *options) error, opts ...Option) {
 	options := &options{}
 	for _, opt := range opts {
 		opt(options)
@@ -106,6 +110,7 @@ func start(handle func(*runtimeClient, *options) error, opts ...Option) {
 	if options.logger == nil {
 		options.logger = defaultLogger()
 	}
+	options.maxConcurrency = MaxConcurrency()
 
 	runtimeAPI := os.Getenv("AWS_LAMBDA_RUNTIME_API")
 	if runtimeAPI == "" {
@@ -113,8 +118,17 @@ func start(handle func(*runtimeClient, *options) error, opts ...Option) {
 		os.Exit(1)
 	}
 
-	done := make(chan struct{})
 	client := newRuntimeClient(runtimeAPI, options.logger)
+	if err := validateRuntimeConfiguration(options); err != nil {
+		options.logger.Error("invalid runtime configuration", "error", err)
+		if reportErr := sendInitError(client, err); reportErr != nil {
+			options.logger.Error("failed to report initialization error", "error", reportErr)
+		}
+		os.Exit(1)
+	}
+
+	workerCtx, cancelWorkers := context.WithCancelCause(context.Background())
+	defer cancelWorkers(errRuntimeShutdown)
 
 	if len(options.extensions) > 0 {
 		extMgr := newExtensionManager(runtimeAPI, options.extensions, options.logger)
@@ -131,24 +145,76 @@ func start(handle func(*runtimeClient, *options) error, opts ...Option) {
 		go func() {
 			<-sigterm
 			extMgr.shutdown()
-			close(done)
+			cancelWorkers(errRuntimeShutdown)
 		}()
 	}
 
-	for {
-		select {
-		case <-done:
-			return
-		default:
-			if err := handle(client, options); err != nil {
-				// Don't log panics here - they're already logged in sendError
-				if !errors.Is(err, errHandlerPanicked) {
-					options.logger.Error("fatal invocation loop error", "error", err)
-				}
-				os.Exit(1)
-			}
+	err := runInvocationWorkers(workerCtx, client, options, handle)
+	if errors.Is(err, errRuntimeShutdown) {
+		return
+	}
+	// Don't log panics here - they're already logged in sendError.
+	if !errors.Is(err, errHandlerPanicked) {
+		options.logger.Error("fatal invocation loop error", "error", err)
+	}
+	os.Exit(1)
+}
+
+// MaxConcurrency returns the number of invocations this runtime process is
+// configured to handle concurrently. Lambda Managed Instances set the value
+// through AWS_LAMBDA_MAX_CONCURRENCY. Standard Lambda environments and invalid
+// values safely fall back to one invocation at a time.
+func MaxConcurrency() int {
+	return configuredMaxConcurrency
+}
+
+func parseMaxConcurrency(raw string) int {
+	value, err := strconv.Atoi(raw)
+	if err != nil || value < 1 {
+		return 1
+	}
+	return value
+}
+
+func (o *options) concurrency() int {
+	if o.maxConcurrency < 1 {
+		return 1
+	}
+	return o.maxConcurrency
+}
+
+func validateRuntimeConfiguration(options *options) error {
+	if os.Getenv(lambdaEnvInitializationType) == managedInstancesInitType && len(options.extensions) > 0 {
+		return &ErrorResponse{
+			Type:    "Runtime.UnsupportedExtension",
+			Message: "internal extensions are not supported on Lambda Managed Instances",
 		}
 	}
+	return nil
+}
+
+func runInvocationWorkers(
+	ctx context.Context,
+	client *runtimeClient,
+	options *options,
+	handle func(context.Context, *runtimeClient, *options) error,
+) error {
+	ctx, cancel := context.WithCancelCause(ctx)
+	defer cancel(errors.New("invocation workers stopped"))
+
+	var wg sync.WaitGroup
+	for range options.concurrency() {
+		wg.Go(func() {
+			for {
+				if err := handle(ctx, client, options); err != nil {
+					cancel(err)
+					return
+				}
+			}
+		})
+	}
+	wg.Wait()
+	return context.Cause(ctx)
 }
 
 func sendInitError(client *runtimeClient, err error) error {
@@ -163,16 +229,16 @@ func sendInitError(client *runtimeClient, err error) error {
 }
 
 func handleInvocation[TIn, TOut any](client *runtimeClient, handler func(context.Context, TIn) (TOut, error), options *options) error {
-	inv, err := client.next()
+	return handleInvocationContext(context.Background(), client, handler, options)
+}
+
+func handleInvocationContext[TIn, TOut any](workerCtx context.Context, client *runtimeClient, handler func(context.Context, TIn) (TOut, error), options *options) error {
+	inv, err := client.nextContext(workerCtx)
 	if err != nil {
 		return fmt.Errorf("failed to get next invocation: %w", err)
 	}
 
-	if options.enableTraceID {
-		// Set this on every invocation, including an empty value, so a missing
-		// header cannot leak the preceding invocation's trace ID.
-		_ = os.Setenv("_X_AMZN_TRACE_ID", inv.headers.Get(headerTraceID))
-	}
+	traceID := inv.headers.Get(headerTraceID)
 
 	deadline, err := parseDeadline(inv.headers.Get(headerDeadlineMS))
 	if err != nil {
@@ -185,6 +251,7 @@ func handleInvocation[TIn, TOut any](client *runtimeClient, handler func(context
 	lc := &LambdaContext{
 		AwsRequestID:       inv.requestID,
 		InvokedFunctionArn: inv.headers.Get(headerFunctionARN),
+		TraceID:            traceID,
 	}
 
 	if cognitoJSON := inv.headers.Get(headerCognitoIdentity); cognitoJSON != "" {

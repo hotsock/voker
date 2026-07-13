@@ -33,6 +33,10 @@ type LambdaContext struct {
 	// InvokedFunctionArn is the ARN of the Lambda function being invoked
 	InvokedFunctionArn string
 
+	// TraceID is the invocation-scoped AWS X-Ray trace header received from the
+	// Lambda Runtime API.
+	TraceID string
+
 	// Identity contains Cognito identity information
 	Identity CognitoIdentity
 
