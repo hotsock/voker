@@ -1,4 +1,4 @@
-module github.com/hotsock/voker/vokerhttp/examples/aws-ingress-probe
+module github.com/hotsock/voker/examples/aws-ingress-probe
 
 go 1.27.0
 

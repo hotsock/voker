@@ -4,7 +4,13 @@ A minimal, modern AWS Lambda runtime for Go that focuses on performance, simplic
 
 ## Overview
 
-Voker is a simplified alternative to [`aws-lambda-go`](https://github.com/aws/aws-lambda-go) that maintains full compatibility with the AWS Lambda Runtime API. It uses Go generics to provide compile-time type safety with a clean, single-function-signature design. It supports structured logging with `slog` and proper log levels for errors, including an optional `vokerslog` handler tuned for AWS Lambda.
+Voker is a simplified alternative to [`aws-lambda-go`](https://github.com/aws/aws-lambda-go) that maintains full compatibility with the AWS Lambda Runtime API. It uses Go generics to provide compile-time type safety with a clean, single-function-signature design. It supports structured logging with `slog` and proper log levels for errors.
+
+Optional subpackages (each imported only when you use it):
+
+- [`vokerhttp`](#nethttp-handlers-vokerhttp) — serve Lambda HTTP events (Function URLs, API Gateway, ALB) with a standard `http.Handler`, including response streaming
+- [`vokercfn`](#cloudformation-custom-resources) — type-safe CloudFormation custom resources
+- [`vokerslog`](#logging) — a `slog.Handler` tuned for AWS Lambda advanced logging controls
 
 ## Installation
 
@@ -98,15 +104,11 @@ return MyResponse{}, &voker.ErrorResponse{
 
 ### Simple Event Types
 
-```go
-// Handle API Gateway events
-func handler(ctx context.Context, event map[string]any) (map[string]any, error) {
-    return map[string]any{
-        "statusCode": 200,
-        "body":       "Hello from Lambda!",
-    }, nil
-}
+Any JSON-deserializable type works as the event. For HTTP event sources
+(Function URLs, API Gateway, ALB), use the [`vokerhttp`
+adapters](#nethttp-handlers-vokerhttp) instead of decoding the event yourself.
 
+```go
 // Handle SQS events
 type SQSEvent struct {
     Records []SQSRecord `json:"Records"`
@@ -195,6 +197,86 @@ This is useful for handlers that work with large payloads and want to measure
 or control their own decoding rather than paying for an unmarshal up front.
 Because validation is skipped, the handler also sees empty or malformed
 payloads as-is instead of voker rejecting them.
+
+### net/http handlers (vokerhttp)
+
+The `vokerhttp` subpackage serves Lambda HTTP events with a standard
+`http.Handler`. An adapter converts the event source's payload into an
+`*http.Request`, runs your handler, and converts the response back —
+including automatic base64 encoding for binary or compressed
+(`Content-Encoding`) bodies and `Content-Type` sniffing to match `net/http`
+server behavior.
+
+```go
+import (
+    "net/http"
+
+    "github.com/hotsock/voker/vokerhttp"
+)
+
+func main() {
+    mux := http.NewServeMux()
+    mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+        w.Write([]byte("Hello from Lambda!"))
+    })
+
+    vokerhttp.Start(mux, &vokerhttp.FunctionURL{})
+}
+```
+
+Built-in adapters:
+
+| Adapter                    | Event source                                  |
+| -------------------------- | --------------------------------------------- |
+| `vokerhttp.FunctionURL{}`  | Lambda Function URL (payload format 2.0)      |
+| `vokerhttp.APIGatewayV2{}` | API Gateway v2 HTTP API (payload format 2.0)  |
+| `vokerhttp.APIGatewayV1{}` | API Gateway v1 REST API Lambda proxy          |
+| `vokerhttp.ALB{}`          | Application Load Balancer Lambda target group |
+
+For ALB target groups with the `lambda.multi_value_headers.enabled` attribute,
+set `&vokerhttp.ALB{MultiValueHeaders: true}`. Without multi-value headers,
+ALB responses cannot carry repeated headers, so only the last `Set-Cookie`
+survives.
+
+The original Lambda event remains available from the request context:
+
+```go
+func handler(w http.ResponseWriter, r *http.Request) {
+    event, ok := vokerhttp.EventFromContext[vokerhttp.FunctionURLRequest](r.Context())
+    // event.RequestContext.HTTP.SourceIP, event.RequestContext.Authorizer, ...
+}
+```
+
+Custom event sources can implement the `vokerhttp.Adapter` interface.
+
+### Internal extensions
+
+Register an [internal extension](https://docs.aws.amazon.com/lambda/latest/dg/runtimes-extensions-api.html)
+with `voker.WithInternalExtension` to run code in the handler process on
+Lambda lifecycle events:
+
+```go
+voker.Start(handler, voker.WithInternalExtension(voker.InternalExtension{
+    Name: "my-extension",
+    OnInit: func() error {
+        // Runs during initialization. An error or panic fails init.
+        return nil
+    },
+    OnInvoke: func(ctx context.Context, event voker.ExtensionEventPayload) {
+        // Runs for each INVOKE event; ctx carries the event deadline.
+    },
+    OnSIGTERM: func(ctx context.Context) {
+        // Lambda sends SIGTERM ~600ms before SIGKILL when extensions are
+        // registered; ctx has a 500ms deadline for cleanup.
+    },
+}))
+```
+
+`INVOKE` is the only Extensions API event available to internal extensions;
+Lambda delivers `SHUTDOWN` only to external extensions, so voker exposes
+shutdown via `OnSIGTERM` instead. Internal extensions are not supported on
+Lambda Managed Instances. See [`examples/extension`](examples/extension) for a
+complete example.
 
 ### Response streaming
 
@@ -442,7 +524,9 @@ func handler(ctx context.Context, event MyEvent) (MyResponse, error) {
 }
 ```
 
-Returns the following (and process exits after panic):
+The panic is reported as the invocation's error response with the panic type,
+message, and a stack trace, and then the process exits (matching official AWS
+runtime behavior, so the execution environment is not reused after a panic):
 
 ```json
 {
@@ -450,49 +534,54 @@ Returns the following (and process exits after panic):
   "errorMessage": "runtime error: index out of range [1] with length 1",
   "stackTrace": [
     {
-      "label": "gopanic",
-      "line": 783,
-      "path": "/usr/local/go/src/runtime/panic.go"
+      "path": "/usr/local/go/src/runtime/panic.go",
+      "line": 859,
+      "label": "gopanic"
     },
     {
-      "label": "goPanicIndex",
-      "line": 115,
-      "path": "/usr/local/go/src/runtime/panic.go"
+      "path": "/usr/local/go/src/runtime/panic.go",
+      "line": 236,
+      "label": "panicBounds64"
     },
     {
-      "label": "handler",
-      "line": 30,
-      "path": "/Users/me/Code/voker/examples/error/main.go"
+      "path": "/usr/local/go/src/runtime/asm_arm64.s",
+      "line": 1357,
+      "label": "panicBounds"
     },
     {
-      "label": "callHandler[...]",
-      "line": 198,
-      "path": "Code/voker/voker.go"
+      "path": "Code/voker/examples/error/main.go",
+      "line": 27,
+      "label": "handler"
     },
     {
-      "label": "handleInvocation[...]",
-      "line": 170,
-      "path": "Code/voker/voker.go"
+      "path": "Code/voker/voker.go",
+      "line": 347,
+      "label": "callHandler[...]"
     },
     {
-      "label": "Start[...]",
-      "line": 120,
-      "path": "Code/voker/voker.go"
+      "path": "Code/voker/voker.go",
+      "line": 286,
+      "label": "handleInvocationContext[...]"
     },
     {
-      "label": "main",
-      "line": 21,
-      "path": "/Users/me/Code/voker/examples/error/main.go"
+      "path": "Code/voker/voker.go",
+      "line": 113,
+      "label": "Start[...].func1"
     },
     {
-      "label": "main",
-      "line": 285,
-      "path": "/usr/local/go/src/runtime/proc.go"
+      "path": "Code/voker/voker.go",
+      "line": 222,
+      "label": "runInvocationWorkers.func1"
     },
     {
-      "label": "goexit",
-      "line": 1268,
-      "path": "/usr/local/go/src/runtime/asm_arm64.s"
+      "path": "/usr/local/go/src/sync/waitgroup.go",
+      "line": 258,
+      "label": "(*WaitGroup).Go.func1"
+    },
+    {
+      "path": "/usr/local/go/src/runtime/asm_arm64.s",
+      "line": 1039,
+      "label": "goexit"
     }
   ]
 }
@@ -580,7 +669,9 @@ func main() {
 
 That's it! If you were using the standard `func(context.Context, TIn) (TOut, error)` signature, it's a drop-in replacement.
 
-If you were using `lambdacontext.LambdaContext` (most likely `lambdacontext.FromContext(ctx)` in your code, switch those to `voker.FromContext(ctx)`).
+If you were using `lambdacontext.LambdaContext` (most likely `lambdacontext.FromContext(ctx)` in your code), switch those calls to `voker.FromContext(ctx)`.
+
+If you were using `aws-lambda-go/events` types for HTTP event sources or `net/http` adapters like `aws-lambda-go-api-proxy`, see [`vokerhttp`](#nethttp-handlers-vokerhttp).
 
 ## License
 
