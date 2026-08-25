@@ -2,7 +2,7 @@ package main
 
 import (
 	"context"
-	"encoding/json"
+	json "encoding/json/v2"
 	"fmt"
 	"io"
 	"log"
@@ -110,7 +110,7 @@ func probeHandler(adapter string) http.Handler {
 		}
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusCreated)
-		if err := json.NewEncoder(w).Encode(out); err != nil {
+		if err := json.MarshalWrite(w, out); err != nil {
 			log.Printf("response encode error: %v", err)
 		}
 	})

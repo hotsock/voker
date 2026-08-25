@@ -2,7 +2,7 @@ package voker
 
 import (
 	"bytes"
-	"encoding/json"
+	json "encoding/json/v2"
 	"fmt"
 	"io"
 	"net/http"
@@ -116,7 +116,7 @@ func (c *extensionAPIClient) next(id string) (*ExtensionEventPayload, error) {
 	}
 
 	var payload ExtensionEventPayload
-	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+	if err := json.UnmarshalRead(resp.Body, &payload); err != nil {
 		return nil, fmt.Errorf("failed to decode event: %w", err)
 	}
 

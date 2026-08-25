@@ -10,7 +10,8 @@ package vokercfn
 import (
 	"bytes"
 	"context"
-	"encoding/json"
+	"encoding/json/jsontext"
+	json "encoding/json/v2"
 	"fmt"
 	"io"
 	"net/http"
@@ -80,7 +81,7 @@ func Start[P, D any](handler Handler[P, D], opts ...voker.Option) {
 // custom entrypoint. It accepts the raw invocation so CloudFormation protocol
 // metadata can be decoded before typed properties. If property decoding fails,
 // Wrap can therefore still send the required FAILED response.
-func Wrap[P, D any](handler Handler[P, D]) func(context.Context, json.RawMessage) (struct{}, error) {
+func Wrap[P, D any](handler Handler[P, D]) func(context.Context, jsontext.Value) (struct{}, error) {
 	return wrapRawWithClient(handler, http.DefaultClient)
 }
 
@@ -108,7 +109,7 @@ type response struct {
 	StackID            string `json:"StackId"`
 	RequestID          string `json:"RequestId"`
 	LogicalResourceID  string `json:"LogicalResourceId"`
-	NoEcho             bool   `json:"NoEcho,omitempty"`
+	NoEcho             bool   `json:"NoEcho,omitzero"`
 	Data               any    `json:"Data,omitempty"`
 }
 
@@ -121,8 +122,8 @@ type eventMetadata struct {
 	StackID            string      `json:"StackId"`
 }
 
-func wrapRawWithClient[P, D any](handler Handler[P, D], client httpClient) func(context.Context, json.RawMessage) (struct{}, error) {
-	return func(ctx context.Context, payload json.RawMessage) (struct{}, error) {
+func wrapRawWithClient[P, D any](handler Handler[P, D], client httpClient) func(context.Context, jsontext.Value) (struct{}, error) {
+	return func(ctx context.Context, payload jsontext.Value) (struct{}, error) {
 		var metadata eventMetadata
 		if err := json.Unmarshal(payload, &metadata); err != nil {
 			return struct{}{}, fmt.Errorf("decode CloudFormation event metadata: %w", err)

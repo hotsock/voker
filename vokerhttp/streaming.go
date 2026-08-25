@@ -1,7 +1,7 @@
 package vokerhttp
 
 import (
-	"encoding/json"
+	json "encoding/json/v2"
 	"fmt"
 	"io"
 	"net/http"
@@ -22,7 +22,7 @@ func (streamingHTTPResponse) ContentType() string {
 // StreamingResponseMetadata is the HTTP response prelude Lambda expects before
 // a streaming response body.
 type StreamingResponseMetadata struct {
-	StatusCode        int                 `json:"statusCode,omitempty"`
+	StatusCode        int                 `json:"statusCode,omitzero"`
 	Headers           map[string]string   `json:"headers,omitempty"`
 	MultiValueHeaders map[string][]string `json:"multiValueHeaders,omitempty"`
 	Cookies           []string            `json:"cookies,omitempty"`

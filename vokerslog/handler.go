@@ -16,7 +16,7 @@ package vokerslog
 
 import (
 	"context"
-	"encoding/json"
+	json "encoding/json/v2"
 	"fmt"
 	"io"
 	"log/slog"
@@ -628,6 +628,13 @@ func appendTextAny(b *buffer, v any) {
 		*b = strconv.AppendQuote(*b, x.Error())
 	case json.Marshaler:
 		raw, err := x.MarshalJSON()
+		if err != nil {
+			*b = strconv.AppendQuote(*b, err.Error())
+			return
+		}
+		*b = strconv.AppendQuote(*b, string(raw))
+	case json.MarshalerTo:
+		raw, err := json.Marshal(x)
 		if err != nil {
 			*b = strconv.AppendQuote(*b, err.Error())
 			return

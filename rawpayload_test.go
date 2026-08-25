@@ -2,7 +2,9 @@ package voker
 
 import (
 	"context"
-	"encoding/json"
+	jsonv1 "encoding/json"
+	"encoding/json/jsontext"
+	json "encoding/json/v2"
 	"io"
 	"log/slog"
 	"net/http"
@@ -25,14 +27,14 @@ func firstByte(b []byte) unsafe.Pointer {
 	return unsafe.Pointer(&b[0])
 }
 
-func TestCallHandler_RawMessage_VerbatimPayload(t *testing.T) {
+func TestCallHandler_RawPayload_VerbatimPayload(t *testing.T) {
 	// Whitespace and key ordering must survive untouched, proving no
 	// re-encoding happened.
 	payload := []byte(`{  "b" :2,
 		"a":1 }`)
 
-	var got json.RawMessage
-	handler := func(ctx context.Context, in json.RawMessage) (string, error) {
+	var got jsontext.Value
+	handler := func(ctx context.Context, in jsontext.Value) (string, error) {
 		got = in
 		return "ok", nil
 	}
@@ -43,11 +45,11 @@ func TestCallHandler_RawMessage_VerbatimPayload(t *testing.T) {
 	assert.Equal(t, string(payload), string(got))
 }
 
-func TestCallHandler_RawMessage_ZeroCopyAlias(t *testing.T) {
+func TestCallHandler_RawPayload_ZeroCopyAlias(t *testing.T) {
 	payload := []byte(`{"large":"payload"}`)
 
-	var got json.RawMessage
-	handler := func(ctx context.Context, in json.RawMessage) (struct{}, error) {
+	var got jsontext.Value
+	handler := func(ctx context.Context, in jsontext.Value) (struct{}, error) {
 		got = in
 		return struct{}{}, nil
 	}
@@ -57,17 +59,17 @@ func TestCallHandler_RawMessage_ZeroCopyAlias(t *testing.T) {
 
 	// The handler must receive the exact same backing array, not a copy.
 	assert.Equal(t, firstByte(payload), firstByte(got),
-		"json.RawMessage input should alias the payload buffer, not copy it")
+		"jsontext.Value input should alias the payload buffer, not copy it")
 }
 
-func TestCallHandler_RawMessage_InvalidJSONNotRejected(t *testing.T) {
+func TestCallHandler_RawPayload_InvalidJSONNotRejected(t *testing.T) {
 	// The whole point of the bypass: invalid JSON is handed through instead of
 	// being rejected with a Runtime.UnmarshalError.
 	payload := []byte(`{not valid json`)
 
 	called := false
-	var got json.RawMessage
-	handler := func(ctx context.Context, in json.RawMessage) (string, error) {
+	var got jsontext.Value
+	handler := func(ctx context.Context, in jsontext.Value) (string, error) {
 		called = true
 		got = in
 		return "handled", nil
@@ -80,10 +82,10 @@ func TestCallHandler_RawMessage_InvalidJSONNotRejected(t *testing.T) {
 	assert.JSONEq(t, `"handled"`, string(out.payload))
 }
 
-func TestCallHandler_RawMessage_EmptyPayload(t *testing.T) {
+func TestCallHandler_RawPayload_EmptyPayload(t *testing.T) {
 	called := false
-	var got json.RawMessage
-	handler := func(ctx context.Context, in json.RawMessage) (string, error) {
+	var got jsontext.Value
+	handler := func(ctx context.Context, in jsontext.Value) (string, error) {
 		called = true
 		got = in
 		return "ok", nil
@@ -96,9 +98,9 @@ func TestCallHandler_RawMessage_EmptyPayload(t *testing.T) {
 	assert.JSONEq(t, `"ok"`, string(out.payload))
 }
 
-func TestCallHandler_RawMessage_NilPayload(t *testing.T) {
-	var got json.RawMessage = json.RawMessage("stale")
-	handler := func(ctx context.Context, in json.RawMessage) (string, error) {
+func TestCallHandler_RawPayload_NilPayload(t *testing.T) {
+	got := jsontext.Value("stale")
+	handler := func(ctx context.Context, in jsontext.Value) (string, error) {
 		got = in
 		return "ok", nil
 	}
@@ -108,11 +110,11 @@ func TestCallHandler_RawMessage_NilPayload(t *testing.T) {
 	assert.Empty(t, got)
 }
 
-func TestCallHandler_RawMessage_HandlerDecodesItself(t *testing.T) {
+func TestCallHandler_RawPayload_HandlerDecodesItself(t *testing.T) {
 	// Realistic usage: the handler owns its own decoding (and could measure it).
 	payload := []byte(`{"name":"voker"}`)
 
-	handler := func(ctx context.Context, in json.RawMessage) (testResponse, error) {
+	handler := func(ctx context.Context, in jsontext.Value) (testResponse, error) {
 		var ev testEvent
 		if err := json.Unmarshal(in, &ev); err != nil {
 			return testResponse{}, err
@@ -125,24 +127,48 @@ func TestCallHandler_RawMessage_HandlerDecodesItself(t *testing.T) {
 	assert.JSONEq(t, `{"message":"hello voker"}`, string(out.payload))
 }
 
-func TestCallHandler_RawMessage_PointerInputUnaffected(t *testing.T) {
-	// A *json.RawMessage input is NOT the bypass type; it must still go through
+func TestCallHandler_RawPayload_PointerInputUnaffected(t *testing.T) {
+	// A *jsontext.Value input is NOT the bypass type; it must still go through
 	// the normal unmarshal path (which validates).
 	payload := []byte(`{not json`)
 
-	handler := func(ctx context.Context, in *json.RawMessage) (string, error) {
+	handler := func(ctx context.Context, in *jsontext.Value) (string, error) {
 		return "ok", nil
 	}
 
 	_, err := callHandler(context.Background(), payload, handler)
-	require.Error(t, err, "*json.RawMessage should not trigger the raw bypass")
+	require.Error(t, err, "*jsontext.Value should not trigger the raw bypass")
 	var errResp *ErrorResponse
 	require.ErrorAs(t, err, &errResp)
 	assert.Equal(t, "Runtime.UnmarshalError", errResp.Type)
 }
 
+// json.RawMessage is a type alias for jsontext.Value as of Go 1.27, so
+// handlers written against the classic type must hit the same bypass. The
+// assignment below fails to compile if the two ever stop being identical.
+var _ func(context.Context, jsontext.Value) (string, error) = func(context.Context, jsonv1.RawMessage) (string, error) {
+	return "", nil
+}
+
+func TestCallHandler_RawMessageAlias_StillBypasses(t *testing.T) {
+	payload := []byte(`{not valid json`)
+
+	var got jsonv1.RawMessage
+	handler := func(ctx context.Context, in jsonv1.RawMessage) (string, error) {
+		got = in
+		return "handled", nil
+	}
+
+	out, err := callHandler(context.Background(), payload, handler)
+	require.NoError(t, err)
+	assert.Equal(t, string(payload), string(got))
+	assert.Equal(t, firstByte(payload), firstByte(got),
+		"json.RawMessage input should alias the payload buffer, not copy it")
+	assert.JSONEq(t, `"handled"`, string(out.payload))
+}
+
 func TestCallHandler_TypedInput_StillValidates(t *testing.T) {
-	// Regression: non-RawMessage handlers must keep rejecting invalid JSON.
+	// Regression: non-raw handlers must keep rejecting invalid JSON.
 	payload := []byte(`{not json`)
 
 	handler := func(ctx context.Context, in testEvent) (string, error) {
@@ -171,10 +197,10 @@ func TestCallHandler_TypedInput_StillUnmarshals(t *testing.T) {
 	assert.JSONEq(t, `{"message":"hi world"}`, string(out.payload))
 }
 
-// TestHandleInvocation_RawMessage_EndToEnd exercises the bypass through the
+// TestHandleInvocation_RawPayload_EndToEnd exercises the bypass through the
 // full invocation loop, including a payload that is deliberately not valid
 // JSON to confirm it reaches the handler instead of being rejected.
-func TestHandleInvocation_RawMessage_EndToEnd(t *testing.T) {
+func TestHandleInvocation_RawPayload_EndToEnd(t *testing.T) {
 	const rawPayload = `this is not json at all`
 
 	responseReceived := false
@@ -199,7 +225,7 @@ func TestHandleInvocation_RawMessage_EndToEnd(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
 	client := newRuntimeClient(server.URL[7:], logger)
 
-	handler := func(ctx context.Context, in json.RawMessage) (string, error) {
+	handler := func(ctx context.Context, in jsontext.Value) (string, error) {
 		// Echo back exactly what we received.
 		return string(in), nil
 	}
@@ -210,11 +236,11 @@ func TestHandleInvocation_RawMessage_EndToEnd(t *testing.T) {
 	assert.JSONEq(t, `"`+rawPayload+`"`, string(receivedResponse))
 }
 
-// BenchmarkCallHandler_RawMessage_1MB demonstrates the bypass: a ~1MB payload
+// BenchmarkCallHandler_RawPayload_1MB demonstrates the bypass: a ~1MB payload
 // is handed to the handler without unmarshaling or validation.
-func BenchmarkCallHandler_RawMessage_1MB(b *testing.B) {
+func BenchmarkCallHandler_RawPayload_1MB(b *testing.B) {
 	payload := makeLargeJSON(1 << 20)
-	handler := func(ctx context.Context, in json.RawMessage) (struct{}, error) {
+	handler := func(ctx context.Context, in jsontext.Value) (struct{}, error) {
 		return struct{}{}, nil
 	}
 	ctx := context.Background()

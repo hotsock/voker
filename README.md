@@ -12,6 +12,18 @@ Voker is a simplified alternative to [`aws-lambda-go`](https://github.com/aws/aw
 go get github.com/hotsock/voker
 ```
 
+Voker requires Go 1.27 or later and processes handler input and output with
+the [`encoding/json/v2`](https://pkg.go.dev/encoding/json/v2) standard library
+package. Compared to the classic `encoding/json` semantics, this means:
+
+- Unmarshaling matches JSON object names to struct fields case-sensitively.
+- Payloads containing duplicate object names or invalid UTF-8 are rejected
+  with a `Runtime.UnmarshalError` instead of being silently accepted.
+- Nil slices marshal as `[]` and nil maps as `{}` (instead of `null`). Types
+  that implement their own marshaling (`json.MarshalerTo`, or the classic
+  `json.Marshaler`) are unaffected and keep full control of their output,
+  including emitting `null`.
+
 ## Usage
 
 ### Basic Handler
@@ -157,12 +169,18 @@ self-contained SAM stack and live concurrency probe.
 
 ### Raw payloads
 
-Declare `TIn` as `json.RawMessage` to receive the invocation payload verbatim.
-Voker skips unmarshaling — and JSON validation — and hands the raw bytes
-straight to your handler, which is then responsible for decoding them:
+Declare `TIn` as `jsontext.Value` (or its alias `json.RawMessage`) to receive
+the invocation payload verbatim. Voker skips unmarshaling — and JSON
+validation — and hands the raw bytes straight to your handler, which is then
+responsible for decoding them:
 
 ```go
-func handler(ctx context.Context, payload json.RawMessage) (Response, error) {
+import (
+    "encoding/json/jsontext"
+    json "encoding/json/v2"
+)
+
+func handler(ctx context.Context, payload jsontext.Value) (Response, error) {
     // payload is the raw request bytes, aliased (not copied) from the
     // invocation buffer. Decode it yourself however you like.
     var event MyEvent

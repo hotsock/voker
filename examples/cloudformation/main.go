@@ -2,7 +2,7 @@ package main
 
 import (
 	"context"
-	"encoding/json"
+	json "encoding/json/v2"
 	"log"
 
 	"github.com/hotsock/voker/vokercfn"

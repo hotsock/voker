@@ -16,7 +16,8 @@ package voker
 
 import (
 	"context"
-	"encoding/json"
+	"encoding/json/jsontext"
+	json "encoding/json/v2"
 	"errors"
 	"fmt"
 	"io"
@@ -83,11 +84,19 @@ func WithLogger(logger *slog.Logger) Option {
 //	    ContentType() string
 //	}
 //
-// As a special case, a handler may declare TIn as json.RawMessage to receive
-// the invocation payload verbatim. voker skips unmarshaling (and JSON
-// validation) and hands the raw bytes to the handler, which is then
-// responsible for decoding them. This is useful for handlers that work with
-// large payloads and want to measure or control their own decoding.
+// As a special case, a handler may declare TIn as jsontext.Value (or its
+// alias json.RawMessage) to receive the invocation payload verbatim. voker
+// skips unmarshaling (and JSON validation) and hands the raw bytes to the
+// handler, which is then responsible for decoding them. This is useful for
+// handlers that work with large payloads and want to measure or control
+// their own decoding.
+//
+// Handler input and output are processed with [encoding/json/v2] semantics:
+// unmarshaling matches JSON object names to struct fields case-sensitively
+// and rejects duplicate object names and invalid UTF-8, while marshaling
+// encodes nil slices as [] and nil maps as {}. Types that implement their
+// own marshaling ([encoding/json/v2.MarshalerTo] or the classic
+// [encoding/json/v2.Marshaler]) keep full control of their representation.
 //
 // On Lambda Managed Instances, AWS_LAMBDA_MAX_CONCURRENCY controls how many
 // invocations call handler concurrently. The handler and all process-wide
@@ -313,19 +322,20 @@ func callHandler[TIn, TOut any](ctx context.Context, payload []byte, handler fun
 
 	var input TIn
 
-	// When the handler's input type is json.RawMessage, hand it the raw payload
-	// verbatim and skip unmarshaling entirely. This lets handlers that work with
-	// large payloads measure and control their own decoding rather than paying
-	// for an unmarshal they didn't ask for.
+	// When the handler's input type is jsontext.Value (or its alias
+	// json.RawMessage), hand it the raw payload verbatim and skip unmarshaling
+	// entirely. This lets handlers that work with large payloads measure and
+	// control their own decoding rather than paying for an unmarshal they
+	// didn't ask for.
 	//
 	// The payload is aliased, not copied: each invocation receives a fresh
 	// buffer (see runtimeClient.next) that voker never reuses or mutates, so
 	// the handler can safely read it for the duration of the invocation.
 	//
-	// Note: this also bypasses JSON validation. A json.RawMessage handler
+	// Note: this also bypasses JSON validation. A jsontext.Value handler
 	// receives the bytes as-is, even if the payload is empty or not valid JSON,
 	// and is responsible for handling those cases itself.
-	if raw, ok := any(&input).(*json.RawMessage); ok {
+	if raw, ok := any(&input).(*jsontext.Value); ok {
 		*raw = payload
 	} else if err := json.Unmarshal(payload, &input); err != nil {
 		return handlerResponse{}, &ErrorResponse{

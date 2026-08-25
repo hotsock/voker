@@ -3,7 +3,8 @@ package main
 import (
 	"bytes"
 	"context"
-	"encoding/json"
+	"encoding/json/jsontext"
+	json "encoding/json/v2"
 	"errors"
 	"fmt"
 	"io"
@@ -91,7 +92,7 @@ func streamPayload(body string) []byte {
 	return append(payload, body...)
 }
 
-func handler(ctx context.Context, raw json.RawMessage) (any, error) {
+func handler(ctx context.Context, raw jsontext.Value) (any, error) {
 	var event request
 	if err := json.Unmarshal(raw, &event); err != nil {
 		return nil, err
