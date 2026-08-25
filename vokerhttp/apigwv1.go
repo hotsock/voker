@@ -140,7 +140,7 @@ func (a *APIGatewayV1) Response(resp *http.Response) (APIGatewayV1Response, erro
 	}
 
 	// Use MultiValueHeaders to preserve all header values (including multiple Set-Cookie)
-	multiHeaders := make(map[string][]string)
+	multiHeaders := make(map[string][]string, len(resp.Header))
 	for k, vals := range resp.Header {
 		multiHeaders[strings.ToLower(k)] = vals
 	}
@@ -155,7 +155,7 @@ func (a *APIGatewayV1) Response(resp *http.Response) (APIGatewayV1Response, erro
 // streaming integration prelude used by API Gateway REST APIs.
 func (a *APIGatewayV1) StreamingResponseMetadata(statusCode int, header http.Header) StreamingResponseMetadata {
 	out := StreamingResponseMetadata{StatusCode: statusCode}
-	multiHeaders := make(map[string][]string)
+	multiHeaders := make(map[string][]string, len(header))
 	for k, values := range header {
 		multiHeaders[strings.ToLower(k)] = append([]string(nil), values...)
 	}

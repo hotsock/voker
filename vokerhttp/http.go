@@ -164,9 +164,10 @@ func (w *bufferedResponseWriter) result() *http.Response {
 		statusCode = http.StatusOK
 	}
 	return &http.Response{
-		StatusCode: statusCode,
-		Header:     w.header,
-		Body:       io.NopCloser(bytes.NewReader(w.body.Bytes())),
+		StatusCode:    statusCode,
+		Header:        w.header,
+		Body:          io.NopCloser(bytes.NewReader(w.body.Bytes())),
+		ContentLength: int64(w.body.Len()),
 	}
 }
 
@@ -255,7 +256,7 @@ func decodeEventBody(body string, isBase64Encoded bool) ([]byte, error) {
 // is skipped whenever Content-Encoding is set, matching net/http servers.
 func responseBody(resp *http.Response) (body string, isBase64Encoded bool, err error) {
 	defer resp.Body.Close()
-	bodyBytes, err := io.ReadAll(resp.Body)
+	bodyBytes, err := readFullBody(resp)
 	if err != nil {
 		return "", false, fmt.Errorf("failed to read response body: %w", err)
 	}
@@ -277,6 +278,22 @@ func responseBody(resp *http.Response) (body string, isBase64Encoded bool, err e
 		return string(bodyBytes), false, nil
 	}
 	return base64.StdEncoding.EncodeToString(bodyBytes), true, nil
+}
+
+// readFullBody reads the entire response body, sizing the buffer from
+// ContentLength when the length is known so large bodies are read in a
+// single allocation instead of io.ReadAll's incremental growth. A
+// ContentLength of zero falls back to io.ReadAll: hand-built responses
+// commonly leave the field unset even when the body is non-empty.
+func readFullBody(resp *http.Response) ([]byte, error) {
+	if resp.ContentLength <= 0 {
+		return io.ReadAll(resp.Body)
+	}
+	buf := make([]byte, resp.ContentLength)
+	if _, err := io.ReadFull(resp.Body, buf); err != nil {
+		return nil, err
+	}
+	return buf, nil
 }
 
 // isEncodedContent reports whether the response headers declare a

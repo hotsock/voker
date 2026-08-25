@@ -29,7 +29,7 @@ func (a *FunctionURL) Response(resp *http.Response) (FunctionURLResponse, error)
 // streaming integration prelude used by Function URLs.
 func (a *FunctionURL) StreamingResponseMetadata(statusCode int, header http.Header) StreamingResponseMetadata {
 	out := StreamingResponseMetadata{StatusCode: statusCode}
-	headers := make(map[string]string)
+	headers := make(map[string]string, len(header))
 	for k, values := range header {
 		if strings.EqualFold(k, "Set-Cookie") {
 			out.Cookies = append(out.Cookies, values...)
@@ -210,7 +210,7 @@ func buildV2Response(resp *http.Response) (PayloadV2Response, error) {
 	}
 
 	// Flatten headers, separating Set-Cookie into the cookies array
-	headers := make(map[string]string)
+	headers := make(map[string]string, len(resp.Header))
 	for k, vals := range resp.Header {
 		lower := strings.ToLower(k)
 		if lower == "set-cookie" {

@@ -125,24 +125,42 @@ func callOnInvoke(ext InternalExtension, eventPayload *ExtensionEventPayload) {
 func (m *extensionManager) eventLoop(ext InternalExtension, id string) {
 	ctx := context.Background()
 
-	for {
-		// Use a channel to make the blocking next() call interruptible
-		type result struct {
-			eventPayload *ExtensionEventPayload
-			err          error
-		}
-		resultCh := make(chan result, 1)
+	type result struct {
+		eventPayload *ExtensionEventPayload
+		err          error
+	}
 
-		go func() {
+	// One long-lived poller keeps the blocking next() call interruptible
+	// without spawning a goroutine and channel per event. It polls only when
+	// handed a token, preserving the Extensions API contract: calling next()
+	// signals that the previous event has been fully processed.
+	poll := make(chan struct{})
+	results := make(chan result)
+	go func() {
+		for range poll {
 			event, err := m.client.next(id)
-			resultCh <- result{event, err}
-		}()
+			select {
+			case results <- result{event, err}:
+			case <-m.done:
+				return
+			}
+		}
+	}()
+	defer close(poll)
+
+	for {
+		select {
+		case poll <- struct{}{}:
+		case <-m.done:
+			// SIGTERM signal received
+			return
+		}
 
 		select {
 		case <-m.done:
 			// SIGTERM signal received
 			return
-		case res := <-resultCh:
+		case res := <-results:
 			if res.err != nil {
 				m.logger.ErrorContext(ctx, "extension event loop error", "extension", ext.Name, "error", res.err)
 				return

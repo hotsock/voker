@@ -145,7 +145,7 @@ func (a *ALB) Response(resp *http.Response) (ALBResponse, error) {
 	}
 
 	if a.MultiValueHeaders {
-		multiHeaders := make(map[string][]string)
+		multiHeaders := make(map[string][]string, len(resp.Header))
 		for k, vals := range resp.Header {
 			multiHeaders[strings.ToLower(k)] = append([]string(nil), vals...)
 		}
@@ -153,7 +153,7 @@ func (a *ALB) Response(resp *http.Response) (ALBResponse, error) {
 			out.MultiValueHeaders = multiHeaders
 		}
 	} else {
-		headers := make(map[string]string)
+		headers := make(map[string]string, len(resp.Header))
 		for k, vals := range resp.Header {
 			if len(vals) == 0 {
 				continue
