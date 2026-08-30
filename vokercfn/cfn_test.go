@@ -231,7 +231,7 @@ func TestWrapTypedDecodeErrorSendsCloudFormationFailure(t *testing.T) {
 	got := decodeResponse(t, client.body)
 	assert.Equal(t, statusFailed, got.Status)
 	assert.Equal(t, "6245fb70-1335-46ef-8452-2a0cde2f8238", got.PhysicalResourceID)
-	assert.Contains(t, got.Reason, "cannot unmarshal JSON string into Go int")
+	assert.Contains(t, got.Reason, "unmarshal JSON string into Go int")
 	assert.Contains(t, got.Reason, `"/ResourceProperties/Count"`)
 }
 
