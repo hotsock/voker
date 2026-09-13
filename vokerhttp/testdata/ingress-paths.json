@@ -1,0 +1,12 @@
+[
+  {"sentPath":"/capture/plain","httpAPIPath":"/capture/plain"},
+  {"sentPath":"/capture/space%20value","httpAPIPath":"/capture/space value"},
+  {"sentPath":"/capture/question%3Fvalue","httpAPIPath":"/capture/question"},
+  {"sentPath":"/capture/percent%25done","httpAPIRejected":true},
+  {"sentPath":"/capture/hash%23value","httpAPIPath":"/capture/hash#value"},
+  {"sentPath":"/capture/slash%2Fvalue","httpAPIPath":"/capture/slash/value"},
+  {"sentPath":"/capture/unicode-%CE%BB-%E4%B8%96%E7%95%8C","httpAPIPath":"/capture/unicode-λ-世界"},
+  {"sentPath":"/capture/literal%252Fvalue","httpAPIPath":"/capture/literal/value"},
+  {"sentPath":"/capture/literal%253Fvalue","httpAPIPath":"/capture/literal?value"},
+  {"sentPath":"/capture/literal%2525value","httpAPIPath":"/capture/literal%value"}
+]

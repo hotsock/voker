@@ -3,10 +3,14 @@ package vokerhttp
 import (
 	"context"
 	"net/http"
+	"net/url"
 )
 
 // APIGatewayV2 implements [Adapter] for API Gateway v2 HTTP API events
 // (payload format 2.0).
+//
+// HTTP APIs supply a decoded rawPath. The adapter preserves that value as
+// URL.Path; it cannot reconstruct escaping or characters removed by AWS.
 //
 //	vokerhttp.Start(mux, &vokerhttp.APIGatewayV2{})
 type APIGatewayV2 struct{}
@@ -21,6 +25,10 @@ type APIGatewayV2Response PayloadV2Response
 
 // Request converts an API Gateway v2 event into an *http.Request.
 func (a *APIGatewayV2) Request(ctx context.Context, event APIGatewayV2Request) (*http.Request, error) {
+	// HTTP APIs deliver a decoded rawPath, unlike Function URLs. Escape it
+	// before the shared URL parser so literal %, ?, and # remain path data.
+	// Any decoding or truncation already performed by AWS is irreversible.
+	event.RawPath = (&url.URL{Path: event.RawPath}).EscapedPath()
 	return buildV2Request(ctx, PayloadV2Request(event))
 }
 
