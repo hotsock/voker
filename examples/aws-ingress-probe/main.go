@@ -18,6 +18,10 @@ type echoResponse struct {
 	Adapter    string              `json:"adapter"`
 	Method     string              `json:"method"`
 	URL        string              `json:"url"`
+	Path       string              `json:"path"`
+	RawPath    string              `json:"rawPath"`
+	RawQuery   string              `json:"rawQuery"`
+	Event      any                 `json:"event"`
 	RequestURI string              `json:"requestUri"`
 	Host       string              `json:"host"`
 	RemoteAddr string              `json:"remoteAddr"`
@@ -28,7 +32,7 @@ type echoResponse struct {
 	RequestID  string              `json:"lambdaRequestId"`
 }
 
-func logEvent(adapter string, ctx context.Context) {
+func requestEvent(adapter string, ctx context.Context) any {
 	var event any
 	switch adapter {
 	case "alb":
@@ -41,18 +45,31 @@ func logEvent(adapter string, ctx context.Context) {
 		event, _ = vokerhttp.EventFromContext[vokerhttp.FunctionURLRequest](ctx)
 	}
 
+	return event
+}
+
+// Capture events before conversion, including those the adapter cannot parse.
+type capturingAdapter[E, R any] struct {
+	vokerhttp.Adapter[E, R]
+}
+
+func (a capturingAdapter[E, R]) Request(ctx context.Context, event E) (*http.Request, error) {
 	b, err := json.Marshal(event)
 	if err != nil {
-		log.Printf("VOKER_EVENT_MARSHAL_ERROR adapter=%s error=%v", adapter, err)
-		return
+		return nil, err
 	}
-	log.Printf("VOKER_EVENT adapter=%s json=%s", adapter, b)
+	log.Printf("VOKER_EVENT json=%s", b)
+	return a.Adapter.Request(ctx, event)
+}
+
+func (a capturingAdapter[E, R]) StreamingResponseMetadata(status int, header http.Header) vokerhttp.StreamingResponseMetadata {
+	return a.Adapter.(interface {
+		StreamingResponseMetadata(int, http.Header) vokerhttp.StreamingResponseMetadata
+	}).StreamingResponseMetadata(status, header)
 }
 
 func probeHandler(adapter string) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		logEvent(adapter, r.Context())
-
 		body, err := io.ReadAll(r.Body)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -99,6 +116,10 @@ func probeHandler(adapter string) http.Handler {
 			Adapter:    adapter,
 			Method:     r.Method,
 			URL:        r.URL.String(),
+			Path:       r.URL.Path,
+			RawPath:    r.URL.RawPath,
+			RawQuery:   r.URL.RawQuery,
+			Event:      requestEvent(adapter, r.Context()),
 			RequestURI: r.RequestURI,
 			Host:       r.Host,
 			RemoteAddr: r.RemoteAddr,
@@ -123,20 +144,20 @@ func main() {
 
 	switch adapter {
 	case "alb":
-		vokerhttp.Start(handler, &vokerhttp.ALB{MultiValueHeaders: true})
+		vokerhttp.Start(handler, capturingAdapter[vokerhttp.ALBRequest, vokerhttp.ALBResponse]{&vokerhttp.ALB{MultiValueHeaders: true}})
 	case "apigwv1":
 		if streaming {
-			vokerhttp.StartStreaming(handler, &vokerhttp.APIGatewayV1{})
+			vokerhttp.StartStreaming(handler, capturingAdapter[vokerhttp.APIGatewayV1Request, vokerhttp.APIGatewayV1Response]{&vokerhttp.APIGatewayV1{}})
 		} else {
-			vokerhttp.Start(handler, &vokerhttp.APIGatewayV1{})
+			vokerhttp.Start(handler, capturingAdapter[vokerhttp.APIGatewayV1Request, vokerhttp.APIGatewayV1Response]{&vokerhttp.APIGatewayV1{}})
 		}
 	case "apigwv2":
-		vokerhttp.Start(handler, &vokerhttp.APIGatewayV2{})
+		vokerhttp.Start(handler, capturingAdapter[vokerhttp.APIGatewayV2Request, vokerhttp.APIGatewayV2Response]{&vokerhttp.APIGatewayV2{}})
 	case "functionurl":
 		if streaming {
-			vokerhttp.StartStreaming(handler, &vokerhttp.FunctionURL{})
+			vokerhttp.StartStreaming(handler, capturingAdapter[vokerhttp.FunctionURLRequest, vokerhttp.FunctionURLResponse]{&vokerhttp.FunctionURL{}})
 		} else {
-			vokerhttp.Start(handler, &vokerhttp.FunctionURL{})
+			vokerhttp.Start(handler, capturingAdapter[vokerhttp.FunctionURLRequest, vokerhttp.FunctionURLResponse]{&vokerhttp.FunctionURL{}})
 		}
 	default:
 		panic(fmt.Sprintf("unknown VOKER_ADAPTER %q", adapter))
