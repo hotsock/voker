@@ -22,11 +22,13 @@ import (
 	"log/slog"
 	"math"
 	"os"
+	"reflect"
 	"runtime"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/hotsock/voker"
@@ -65,15 +67,21 @@ type Handler struct {
 	hasFunctionName    bool
 	hasFunctionVersion bool
 
-	gattr []groupOrAttrs
+	// pre is the WithAttrs/WithGroup chain, serialized once so Handle only
+	// copies bytes.
+	pre *preformatted
 }
 
 // Option configures a [Handler]. Pass options to [NewHandler].
 type Option func(*Handler)
 
 // WithLevel sets the minimum log level. Messages below this level are dropped.
-// Defaults to the value of AWS_LAMBDA_LOG_LEVEL, or INFO if unset.
+// Defaults to the value of AWS_LAMBDA_LOG_LEVEL, or INFO if unset. A nil
+// level means INFO, matching [slog.HandlerOptions].
 func WithLevel(level slog.Leveler) Option {
+	if level == nil {
+		level = slog.LevelInfo
+	}
 	return func(h *Handler) {
 		h.level = level
 	}
@@ -148,6 +156,7 @@ func NewHandler(w io.Writer, options ...Option) *Handler {
 		level:   loggerLevelFromLambdaEnv(),
 		json:    loggerIsJSON(),
 		logType: "app.log",
+		pre:     &preformatted{sep: true},
 	}
 	h.functionName, h.hasFunctionName = os.LookupEnv(lambdaEnvFunctionName)
 	h.functionVersion, h.hasFunctionVersion = os.LookupEnv(lambdaEnvFunctionVersion)
@@ -216,11 +225,16 @@ func (h *Handler) Enabled(_ context.Context, level slog.Level) bool {
 	return level >= h.level.Level()
 }
 
+// WithAttrs returns a Handler that writes attrs on every record. Like
+// [slog.JSONHandler], it serializes attrs once, here, so any [slog.LogValuer]
+// among them is resolved once rather than on every record.
 func (h *Handler) WithAttrs(attrs []slog.Attr) slog.Handler {
 	if len(attrs) == 0 {
 		return h
 	}
-	return h.copy(groupOrAttrs{attrs: attrs})
+	c := *h
+	c.preformatAttrs(attrs)
+	return &c
 }
 
 func (h *Handler) WithGroup(name string) slog.Handler {
@@ -228,474 +242,518 @@ func (h *Handler) WithGroup(name string) slog.Handler {
 		// slog requires WithGroup("") to be a no-op.
 		return h
 	}
-	return h.copy(groupOrAttrs{group: name})
-}
-
-func (h *Handler) copy(g groupOrAttrs) *Handler {
 	c := *h
-	c.gattr = make([]groupOrAttrs, len(h.gattr)+1)
-	copy(c.gattr, h.gattr)
-	c.gattr[len(c.gattr)-1] = g
+	c.pre = h.pre.withGroup(name)
 	return &c
 }
 
-// groupOrAttrs holds either a group name (from WithGroup) or a set of
-// attributes (from WithAttrs).
-type groupOrAttrs struct {
-	group string      // group name if non-empty
-	attrs []slog.Attr // attrs if non-empty
+// preformatted is the WithAttrs/WithGroup chain serialized once, the way
+// slog.JSONHandler pre-formats its attrs. groups[:nOpen] are open in buf (and
+// prefix, for text) and Handle closes them after the record's own attrs;
+// groups[nOpen:] are still pending and only open if the record has attrs to
+// put in them, so a trailing empty group is omitted.
+type preformatted struct {
+	buf         []byte
+	sep         bool
+	prefix      []byte
+	prefixQuote bool
+	groups      []string
+	nOpen       int
+}
+
+func (p *preformatted) withGroup(name string) *preformatted {
+	c := *p
+	c.groups = append(p.groups[:len(p.groups):len(p.groups)], name)
+	return &c
+}
+
+// preformatAttrs serializes attrs onto h.pre, opening any pending groups first
+// and leaving them open for Handle to close. If attrs write nothing, h.pre and
+// its pending groups are left as they were. At the top level (no groups), a
+// TypeKey string attr replaces h.logType instead of being written.
+func (h *Handler) preformatAttrs(attrs []slog.Attr) {
+	p := h.pre
+	s := &handleState{h: h, buf: make([]byte, 0, len(p.buf)+64)}
+	s.loadPreformatted(p)
+	for _, name := range p.groups[p.nOpen:] {
+		s.openGroup(name)
+	}
+	start := len(s.buf)
+
+	atTop := len(p.groups) == 0
+	for _, a := range attrs {
+		if atTop && a.Key == TypeKey {
+			a.Value = a.Value.Resolve()
+			if a.Value.Kind() == slog.KindString {
+				h.logType = a.Value.String()
+				continue
+			}
+		}
+		s.appendAttr(a)
+	}
+
+	if len(s.buf) == start {
+		return
+	}
+	h.pre = &preformatted{
+		buf:         s.buf,
+		sep:         s.sep,
+		prefix:      s.prefix,
+		prefixQuote: s.prefixQuote,
+		groups:      p.groups,
+		nOpen:       len(p.groups),
+	}
 }
 
 func (h *Handler) Handle(ctx context.Context, record slog.Record) error {
-	buf := newBuffer()
-	defer freeBuffer(buf)
+	s := newHandleState(h)
+	defer s.free()
 
 	if h.json {
-		h.appendJSON(buf, ctx, record)
-	} else {
-		h.appendText(buf, ctx, record)
+		s.buf = append(s.buf, '{')
 	}
+
+	s.appendBuiltinKey(slog.LevelKey)
+	s.appendString(lambdaLoggerLevelString(record.Level))
+
+	if record.Message != "" {
+		s.appendBuiltinKey(slog.MessageKey)
+		s.appendString(record.Message)
+	}
+
+	if !record.Time.IsZero() && !h.excludeTime {
+		s.appendBuiltinKey(slog.TimeKey)
+		s.appendTime(record.Time)
+	}
+
+	if reqID, hasReq := requestID(ctx); h.hasFunctionName || h.hasFunctionVersion || hasReq {
+		s.openBuiltinGroup("record")
+		if h.hasFunctionName {
+			s.appendBuiltinKey("functionName")
+			s.appendString(h.functionName)
+		}
+		if h.hasFunctionVersion {
+			s.appendBuiltinKey("version")
+			s.appendString(h.functionVersion)
+		}
+		if hasReq {
+			s.appendBuiltinKey("requestId")
+			s.appendString(reqID)
+		}
+		s.closeBuiltinGroup()
+	}
+
+	if logType := s.recordType(&record); logType != "" {
+		s.appendBuiltinKey(TypeKey)
+		s.appendString(logType)
+	}
+
+	if h.source && record.PC != 0 {
+		f := frameFor(record.PC)
+		s.openBuiltinGroup(slog.SourceKey)
+		s.appendBuiltinKey("function")
+		s.appendString(f.Function)
+		s.appendBuiltinKey("file")
+		s.appendString(f.File)
+		s.appendBuiltinKey("line")
+		s.buf = strconv.AppendInt(s.buf, int64(f.Line), 10)
+		s.closeBuiltinGroup()
+	}
+
+	s.appendAttrs(&record)
+
+	if h.json {
+		s.buf = append(s.buf, '}')
+	}
+	s.buf = append(s.buf, '\n')
 
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
-	_, err := h.out.Write(*buf)
+	_, err := h.out.Write(s.buf)
 	return err
 }
 
 var _ slog.Handler = (*Handler)(nil)
 
-// --- JSON encoding -----------------------------------------------------------
+// --- Record encoding ---------------------------------------------------------
 
-func (h *Handler) appendJSON(buf *buffer, ctx context.Context, record slog.Record) {
-	buf.writeString(`{"level":`)
-	appendJSONString(buf, lambdaLoggerLevelString(record.Level))
-	if record.Message != "" {
-		buf.writeString(`,"msg":`)
-		appendJSONString(buf, record.Message)
+// handleState assembles one record directly into buf, in either format.
+type handleState struct {
+	h   *Handler
+	buf []byte
+	sep bool // whether the next key needs a leading separator
+
+	// Text output flattens groups into a dotted key prefix.
+	prefix      []byte
+	prefixQuote bool
+
+	marks      []groupMark  // pending groups opened by appendAttrs
+	typeValues []slog.Value // resolved top-level TypeKey record attrs, in order
+}
+
+// groupMark records the state before openGroup, so closeGroup can drop the
+// group again if nothing was written inside it.
+type groupMark struct {
+	start       int
+	opened      int
+	sep         bool
+	prefixLen   int
+	prefixQuote bool
+}
+
+// maxBufferSize caps the buffers kept in statePool, so one oversized record
+// doesn't pin its memory for the life of the process.
+const maxBufferSize = 16 << 10
+
+var statePool = sync.Pool{
+	New: func() any {
+		return &handleState{buf: make([]byte, 0, 1024)}
+	},
+}
+
+func newHandleState(h *Handler) *handleState {
+	s := statePool.Get().(*handleState)
+	s.h = h
+	return s
+}
+
+func (s *handleState) free() {
+	if cap(s.buf) > maxBufferSize || cap(s.prefix) > maxBufferSize {
+		return
 	}
+	clear(s.typeValues)
+	s.h = nil
+	s.buf = s.buf[:0]
+	s.sep = false
+	s.prefix = s.prefix[:0]
+	s.prefixQuote = false
+	s.marks = s.marks[:0]
+	s.typeValues = s.typeValues[:0]
+	statePool.Put(s)
+}
 
-	if !record.Time.IsZero() && !h.excludeTime {
-		buf.writeString(`,"time":`)
-		buf.writeByte('"')
-		*buf = record.Time.AppendFormat(*buf, time.RFC3339Nano)
-		buf.writeByte('"')
+// Write appends p to the record, so json.MarshalWrite can encode into it.
+func (s *handleState) Write(p []byte) (int, error) {
+	s.buf = append(s.buf, p...)
+	return len(p), nil
+}
+
+func (s *handleState) loadPreformatted(p *preformatted) {
+	s.buf = append(s.buf, p.buf...)
+	s.sep = p.sep
+	s.prefix = append(s.prefix[:0], p.prefix...)
+	s.prefixQuote = p.prefixQuote
+}
+
+// recordType returns the effective "type" value for a record: the handler's
+// type (from WithType or a TypeKey attr passed to WithAttrs), overridden by a
+// top-level string attribute named TypeKey on the record. Attributes nested in
+// a group are not considered. The resolved TypeKey values are kept for
+// appendAttrs so a LogValuer is only resolved once.
+func (s *handleState) recordType(r *slog.Record) string {
+	logType := s.h.logType
+	if len(s.h.pre.groups) > 0 {
+		return logType
 	}
-
-	if reqID, hasReq := requestID(ctx); h.hasFunctionName || h.hasFunctionVersion || hasReq {
-		buf.writeString(`,"record":{`)
-		sep := false
-		writeField := func(key, val string) {
-			if sep {
-				buf.writeByte(',')
+	r.Attrs(func(a slog.Attr) bool {
+		if a.Key == TypeKey {
+			v := a.Value.Resolve()
+			s.typeValues = append(s.typeValues, v)
+			if v.Kind() == slog.KindString {
+				logType = v.String()
 			}
-			appendJSONString(buf, key)
-			buf.writeByte(':')
-			appendJSONString(buf, val)
-			sep = true
 		}
-		if h.hasFunctionName {
-			writeField("functionName", h.functionName)
-		}
-		if h.hasFunctionVersion {
-			writeField("version", h.functionVersion)
-		}
-		if hasReq {
-			writeField("requestId", reqID)
-		}
-		buf.writeByte('}')
-	}
-
-	if logType := h.recordType(record); logType != "" {
-		buf.writeString(`,"type":`)
-		appendJSONString(buf, logType)
-	}
-
-	if h.source && record.PC != 0 {
-		f := frameFor(record.PC)
-		buf.writeString(`,"source":{"function":`)
-		appendJSONString(buf, f.Function)
-		buf.writeString(`,"file":`)
-		appendJSONString(buf, f.File)
-		buf.writeString(`,"line":`)
-		*buf = strconv.AppendInt(*buf, int64(f.Line), 10)
-		buf.writeByte('}')
-	}
-
-	// Attributes are nested under any open groups. Group braces are opened
-	// lazily so that empty groups are omitted entirely.
-	st := jsonState{buf: buf, needComma: true}
-	atTop := true
-	for _, ga := range h.gattr {
-		if ga.group != "" {
-			st.pending = append(st.pending, ga.group)
-			atTop = false
-		} else {
-			for _, a := range ga.attrs {
-				if atTop && isReservedType(a) {
-					continue
-				}
-				st.appendAttr(a)
-			}
-		}
-	}
-	record.Attrs(func(a slog.Attr) bool {
-		if atTop && isReservedType(a) {
-			return true
-		}
-		st.appendAttr(a)
 		return true
 	})
-	st.closeGroups()
-
-	buf.writeString("}\n")
+	return logType
 }
 
-// jsonState tracks group nesting while streaming a record's attributes to a
-// JSON buffer. Group objects are opened lazily (on the first attribute that
-// lands inside them) so empty groups produce no output.
-type jsonState struct {
-	buf       *buffer
-	pending   []string // group names not yet written as objects
-	openDepth int      // number of group objects currently open
-	needComma bool     // whether the next value needs a leading comma
-}
-
-func (s *jsonState) openPending() {
-	for _, name := range s.pending {
-		if s.needComma {
-			s.buf.writeByte(',')
-		}
-		appendJSONString(s.buf, name)
-		s.buf.writeByte(':')
-		s.buf.writeByte('{')
-		s.needComma = false
-		s.openDepth++
+// appendAttrs writes the preformatted chain, then the record's attributes
+// inside any groups the chain left open or pending. recordType must have run
+// first.
+func (s *handleState) appendAttrs(r *slog.Record) {
+	p := s.h.pre
+	s.loadPreformatted(p)
+	for _, name := range p.groups[p.nOpen:] {
+		s.marks = append(s.marks, s.openGroup(name))
 	}
-	s.pending = s.pending[:0]
+
+	atTop := len(p.groups) == 0
+	n := 0
+	r.Attrs(func(a slog.Attr) bool {
+		if atTop && a.Key == TypeKey {
+			a.Value = s.typeValues[n]
+			n++
+			if a.Value.Kind() == slog.KindString {
+				return true
+			}
+		}
+		s.appendAttr(a)
+		return true
+	})
+
+	for i := len(s.marks) - 1; i >= 0; i-- {
+		s.closeGroup(s.marks[i])
+	}
+	if s.h.json {
+		for range p.nOpen {
+			s.buf = append(s.buf, '}')
+		}
+	}
 }
 
-func (s *jsonState) appendAttr(a slog.Attr) {
+func (s *handleState) appendAttr(a slog.Attr) {
 	a.Value = a.Value.Resolve()
 	if a.Equal(slog.Attr{}) {
 		return
 	}
 
-	if a.Value.Kind() == slog.KindGroup {
-		attrs := a.Value.Group()
-		if len(attrs) == 0 {
-			return
-		}
-		if a.Key == "" {
-			// An inline (unnamed) group hoists its attributes to the parent.
-			for _, sub := range attrs {
-				s.appendAttr(sub)
-			}
-			return
-		}
-		s.openPending()
-		if s.needComma {
-			s.buf.writeByte(',')
-		}
-		appendJSONString(s.buf, a.Key)
-		s.buf.writeByte(':')
-		s.buf.writeByte('{')
-		s.needComma = false
-		for _, sub := range attrs {
-			s.appendAttr(sub)
-		}
-		s.buf.writeByte('}')
-		s.needComma = true
+	if a.Value.Kind() != slog.KindGroup {
+		s.appendKey(a.Key)
+		s.appendValue(a.Value)
 		return
 	}
 
-	s.openPending()
-	if s.needComma {
-		s.buf.writeByte(',')
+	if a.Key == "" {
+		// An inline (unnamed) group hoists its attributes to the parent.
+		for _, sub := range a.Value.Group() {
+			s.appendAttr(sub)
+		}
+		return
 	}
-	appendJSONString(s.buf, a.Key)
-	s.buf.writeByte(':')
-	appendJSONValue(s.buf, a.Value)
-	s.needComma = true
+
+	g := s.openGroup(a.Key)
+	for _, sub := range a.Value.Group() {
+		s.appendAttr(sub)
+	}
+	s.closeGroup(g)
 }
 
-func (s *jsonState) closeGroups() {
-	for ; s.openDepth > 0; s.openDepth-- {
-		s.buf.writeByte('}')
+// openGroup starts a nested group: an object in JSON, a key prefix in text.
+// closeGroup drops it again if nothing was written inside, since slog
+// requires empty groups to be omitted.
+func (s *handleState) openGroup(name string) groupMark {
+	g := groupMark{
+		start:       len(s.buf),
+		sep:         s.sep,
+		prefixLen:   len(s.prefix),
+		prefixQuote: s.prefixQuote,
+	}
+
+	if s.h.json {
+		s.appendKey(name)
+		s.buf = append(s.buf, '{')
+		s.sep = false
+	} else {
+		s.prefix = append(append(s.prefix, name...), '.')
+		s.prefixQuote = s.prefixQuote || textNeedsQuoting(name)
+	}
+
+	g.opened = len(s.buf)
+	return g
+}
+
+func (s *handleState) closeGroup(g groupMark) {
+	s.prefix = s.prefix[:g.prefixLen]
+	s.prefixQuote = g.prefixQuote
+
+	if len(s.buf) == g.opened {
+		s.buf = s.buf[:g.start]
+		s.sep = g.sep
+		return
+	}
+
+	if s.h.json {
+		s.buf = append(s.buf, '}')
 	}
 }
 
-func appendJSONValue(b *buffer, v slog.Value) {
+func (s *handleState) appendKey(key string) {
+	if s.sep {
+		if s.h.json {
+			s.buf = append(s.buf, ',')
+		} else {
+			s.buf = append(s.buf, ' ')
+		}
+	}
+	s.sep = true
+
+	if s.h.json {
+		s.buf = appendJSONString(s.buf, key)
+		s.buf = append(s.buf, ':')
+		return
+	}
+
+	if s.prefixQuote || textNeedsQuoting(key) {
+		s.buf = strconv.AppendQuote(s.buf, string(s.prefix)+key)
+	} else {
+		s.buf = append(s.buf, s.prefix...)
+		s.buf = append(s.buf, key...)
+	}
+	s.buf = append(s.buf, '=')
+}
+
+// appendBuiltinKey is appendKey for the handler's own keys, which never need
+// escaping or quoting.
+func (s *handleState) appendBuiltinKey(key string) {
+	if s.h.json {
+		if s.sep {
+			s.buf = append(s.buf, ',')
+		}
+		s.buf = append(s.buf, '"')
+		s.buf = append(s.buf, key...)
+		s.buf = append(s.buf, '"', ':')
+	} else {
+		if s.sep {
+			s.buf = append(s.buf, ' ')
+		}
+		s.buf = append(s.buf, s.prefix...)
+		s.buf = append(s.buf, key...)
+		s.buf = append(s.buf, '=')
+	}
+	s.sep = true
+}
+
+// openBuiltinGroup and closeBuiltinGroup bracket one of the handler's own
+// top-level groups ("record", "source"), which are never empty.
+func (s *handleState) openBuiltinGroup(name string) {
+	if s.h.json {
+		s.appendBuiltinKey(name)
+		s.buf = append(s.buf, '{')
+		s.sep = false
+	} else {
+		s.prefix = append(append(s.prefix, name...), '.')
+	}
+}
+
+func (s *handleState) closeBuiltinGroup() {
+	if s.h.json {
+		s.buf = append(s.buf, '}')
+	} else {
+		s.prefix = s.prefix[:0]
+	}
+}
+
+func (s *handleState) appendValue(v slog.Value) {
 	switch v.Kind() {
 	case slog.KindString:
-		appendJSONString(b, v.String())
+		s.appendString(v.String())
 	case slog.KindInt64:
-		*b = strconv.AppendInt(*b, v.Int64(), 10)
+		s.buf = strconv.AppendInt(s.buf, v.Int64(), 10)
 	case slog.KindUint64:
-		*b = strconv.AppendUint(*b, v.Uint64(), 10)
+		s.buf = strconv.AppendUint(s.buf, v.Uint64(), 10)
 	case slog.KindFloat64:
-		appendJSONFloat(b, v.Float64())
+		s.appendFloat(v.Float64())
 	case slog.KindBool:
-		*b = strconv.AppendBool(*b, v.Bool())
+		s.buf = strconv.AppendBool(s.buf, v.Bool())
 	case slog.KindDuration:
-		appendJSONString(b, v.Duration().String())
+		s.appendString(v.Duration().String())
 	case slog.KindTime:
-		b.writeByte('"')
-		*b = v.Time().AppendFormat(*b, time.RFC3339Nano)
-		b.writeByte('"')
+		s.appendTime(v.Time())
 	case slog.KindAny:
-		appendJSONAny(b, v.Any())
+		s.appendAny(v.Any())
 	default:
 		// KindGroup is handled at the attribute level; anything else falls
 		// back to its string form.
-		appendJSONString(b, v.String())
+		s.appendString(v.String())
 	}
 }
 
-func appendJSONFloat(b *buffer, f float64) {
-	if math.IsInf(f, 0) || math.IsNaN(f) {
+// appendString writes a JSON string, or an always-quoted text value.
+func (s *handleState) appendString(str string) {
+	if s.h.json {
+		s.buf = appendJSONString(s.buf, str)
+	} else {
+		s.buf = strconv.AppendQuote(s.buf, str)
+	}
+}
+
+func (s *handleState) appendTime(t time.Time) {
+	s.buf = append(s.buf, '"')
+	s.buf = t.AppendFormat(s.buf, time.RFC3339Nano)
+	s.buf = append(s.buf, '"')
+}
+
+func (s *handleState) appendFloat(f float64) {
+	if s.h.json && (math.IsInf(f, 0) || math.IsNaN(f)) {
 		// JSON has no representation for these, so emit a string instead of
 		// producing invalid output.
-		appendJSONString(b, strconv.FormatFloat(f, 'g', -1, 64))
+		s.appendString(strconv.FormatFloat(f, 'g', -1, 64))
 		return
 	}
-	*b = strconv.AppendFloat(*b, f, 'g', -1, 64)
+	s.buf = strconv.AppendFloat(s.buf, f, 'g', -1, 64)
 }
 
-func appendJSONAny(b *buffer, v any) {
+// appendAny writes a KindAny value. This is where user code runs (Error,
+// MarshalJSON, String), so like slog's built-in handlers it recovers from a
+// panic instead of taking down the invocation: a nil pointer receiver is
+// written as "<nil>", anything else as the panic message.
+func (s *handleState) appendAny(v any) {
+	mark := len(s.buf)
+	defer func() {
+		if r := recover(); r != nil {
+			s.buf = s.buf[:mark]
+			if rv := reflect.ValueOf(v); rv.Kind() == reflect.Pointer && rv.IsNil() {
+				s.appendString("<nil>")
+				return
+			}
+			s.appendString(fmt.Sprintf("!PANIC: %v", r))
+		}
+	}()
+
+	if s.h.json {
+		s.appendJSONAny(v)
+	} else {
+		s.appendTextAny(v)
+	}
+}
+
+func (s *handleState) appendJSONAny(v any) {
 	switch x := v.(type) {
 	case nil:
-		b.writeString("null")
+		s.buf = append(s.buf, "null"...)
 	case error:
-		appendJSONString(b, x.Error())
+		s.buf = appendJSONString(s.buf, x.Error())
 	default:
 		// Marshal arbitrary values (structs, slices, json.Marshalers, ...)
-		// natively. This is the only reflection path and is rarely hit.
-		raw, err := json.Marshal(v)
-		if err != nil {
-			appendJSONString(b, err.Error())
-			return
+		// natively, straight into the buffer. This is the only reflection path
+		// and is rarely hit.
+		mark := len(s.buf)
+		if err := json.MarshalWrite(s, v); err != nil {
+			s.buf = appendJSONString(s.buf[:mark], err.Error())
 		}
-		*b = append(*b, raw...)
 	}
 }
 
-// --- Text encoding -----------------------------------------------------------
-
-func (h *Handler) appendText(buf *buffer, ctx context.Context, record slog.Record) {
-	buf.writeString("level=")
-	*buf = strconv.AppendQuote(*buf, lambdaLoggerLevelString(record.Level))
-	buf.writeByte(' ')
-	if record.Message != "" {
-		buf.writeString("msg=")
-		*buf = strconv.AppendQuote(*buf, record.Message)
-		buf.writeByte(' ')
-	}
-
-	if !record.Time.IsZero() && !h.excludeTime {
-		buf.writeString(`time="`)
-		*buf = record.Time.AppendFormat(*buf, time.RFC3339Nano)
-		buf.writeString(`" `)
-	}
-
-	if h.hasFunctionName {
-		buf.writeString("record.functionName=")
-		*buf = strconv.AppendQuote(*buf, h.functionName)
-		buf.writeByte(' ')
-	}
-	if h.hasFunctionVersion {
-		buf.writeString("record.version=")
-		*buf = strconv.AppendQuote(*buf, h.functionVersion)
-		buf.writeByte(' ')
-	}
-	if reqID, ok := requestID(ctx); ok {
-		buf.writeString("record.requestId=")
-		*buf = strconv.AppendQuote(*buf, reqID)
-		buf.writeByte(' ')
-	}
-
-	if logType := h.recordType(record); logType != "" {
-		buf.writeString("type=")
-		*buf = strconv.AppendQuote(*buf, logType)
-		buf.writeByte(' ')
-	}
-
-	if h.source && record.PC != 0 {
-		f := frameFor(record.PC)
-		buf.writeString("source.function=")
-		*buf = strconv.AppendQuote(*buf, f.Function)
-		buf.writeString(" source.file=")
-		*buf = strconv.AppendQuote(*buf, f.File)
-		buf.writeString(" source.line=")
-		*buf = strconv.AppendInt(*buf, int64(f.Line), 10)
-		buf.writeByte(' ')
-	}
-
-	// prefix accumulates open group names (dot-separated) and is grown in
-	// place as groups open. Attributes are written with the prefix in effect
-	// at their position in the chain.
-	var prefix []byte
-	atTop := true
-	for _, ga := range h.gattr {
-		if ga.group != "" {
-			prefix = append(prefix, ga.group...)
-			prefix = append(prefix, '.')
-			atTop = false
-		} else {
-			for _, a := range ga.attrs {
-				if atTop && isReservedType(a) {
-					continue
-				}
-				appendTextAttr(buf, prefix, a)
-			}
-		}
-	}
-	record.Attrs(func(a slog.Attr) bool {
-		if atTop && isReservedType(a) {
-			return true
-		}
-		appendTextAttr(buf, prefix, a)
-		return true
-	})
-
-	// Every field is written with a trailing space; replace the last one with
-	// a newline. The level field guarantees the buffer is non-empty.
-	if n := len(*buf); n > 0 && (*buf)[n-1] == ' ' {
-		(*buf)[n-1] = '\n'
-	} else {
-		buf.writeByte('\n')
-	}
-}
-
-func appendTextAttr(buf *buffer, prefix []byte, a slog.Attr) {
-	a.Value = a.Value.Resolve()
-	if a.Equal(slog.Attr{}) {
-		return
-	}
-
-	if a.Value.Kind() == slog.KindGroup {
-		attrs := a.Value.Group()
-		if len(attrs) == 0 {
-			return
-		}
-		sub := prefix
-		if a.Key != "" {
-			// Build a fresh slice so growing the nested prefix never mutates
-			// the caller's backing array.
-			sub = append(append(append([]byte{}, prefix...), a.Key...), '.')
-		}
-		for _, s := range attrs {
-			appendTextAttr(buf, sub, s)
-		}
-		return
-	}
-
-	*buf = append(*buf, prefix...)
-	buf.writeString(a.Key)
-	buf.writeByte('=')
-	appendTextValue(buf, a.Value)
-	buf.writeByte(' ')
-}
-
-func appendTextValue(b *buffer, v slog.Value) {
-	switch v.Kind() {
-	case slog.KindString:
-		*b = strconv.AppendQuote(*b, v.String())
-	case slog.KindInt64:
-		*b = strconv.AppendInt(*b, v.Int64(), 10)
-	case slog.KindUint64:
-		*b = strconv.AppendUint(*b, v.Uint64(), 10)
-	case slog.KindFloat64:
-		*b = strconv.AppendFloat(*b, v.Float64(), 'g', -1, 64)
-	case slog.KindBool:
-		*b = strconv.AppendBool(*b, v.Bool())
-	case slog.KindDuration:
-		*b = strconv.AppendQuote(*b, v.Duration().String())
-	case slog.KindTime:
-		b.writeByte('"')
-		*b = v.Time().AppendFormat(*b, time.RFC3339Nano)
-		b.writeByte('"')
-	case slog.KindAny:
-		appendTextAny(b, v.Any())
-	default:
-		*b = strconv.AppendQuote(*b, v.String())
-	}
-}
-
-func appendTextAny(b *buffer, v any) {
+func (s *handleState) appendTextAny(v any) {
 	switch x := v.(type) {
 	case error:
-		*b = strconv.AppendQuote(*b, x.Error())
+		s.buf = strconv.AppendQuote(s.buf, x.Error())
 	case json.Marshaler:
 		raw, err := x.MarshalJSON()
 		if err != nil {
-			*b = strconv.AppendQuote(*b, err.Error())
+			s.buf = strconv.AppendQuote(s.buf, err.Error())
 			return
 		}
-		*b = strconv.AppendQuote(*b, string(raw))
+		s.buf = strconv.AppendQuote(s.buf, string(raw))
 	case json.MarshalerTo:
 		raw, err := json.Marshal(x)
 		if err != nil {
-			*b = strconv.AppendQuote(*b, err.Error())
+			s.buf = strconv.AppendQuote(s.buf, err.Error())
 			return
 		}
-		*b = strconv.AppendQuote(*b, string(raw))
+		s.buf = strconv.AppendQuote(s.buf, string(raw))
 	default:
-		*b = fmt.Appendf(*b, "%v", v)
+		mark := len(s.buf)
+		s.buf = fmt.Appendf(s.buf, "%v", v)
+		if str := string(s.buf[mark:]); textNeedsQuoting(str) {
+			s.buf = strconv.AppendQuote(s.buf[:mark], str)
+		}
 	}
 }
 
 // --- Shared helpers ----------------------------------------------------------
-
-// recordType returns the effective "type" value for a record: the handler's
-// configured type, overridden by a top-level (non-grouped) string attribute
-// named TypeKey. A per-record attribute takes precedence over one set via
-// WithAttrs. Attributes nested inside a group are not considered.
-func (h *Handler) recordType(record slog.Record) string {
-	logType := h.logType
-	atTop := true
-	for _, ga := range h.gattr {
-		if ga.group != "" {
-			atTop = false
-			continue
-		}
-		if atTop {
-			for _, a := range ga.attrs {
-				if v, ok := reservedType(a); ok {
-					logType = v
-				}
-			}
-		}
-	}
-	if atTop {
-		record.Attrs(func(a slog.Attr) bool {
-			if v, ok := reservedType(a); ok {
-				logType = v
-			}
-			return true
-		})
-	}
-	return logType
-}
-
-// isReservedType reports whether a is the reserved TypeKey attribute, which is
-// consumed to set the record's "type" field rather than emitted normally.
-func isReservedType(a slog.Attr) bool {
-	_, ok := reservedType(a)
-	return ok
-}
-
-// reservedType returns the override type carried by a, if a is a string-valued
-// TypeKey attribute.
-func reservedType(a slog.Attr) (string, bool) {
-	if a.Key != TypeKey {
-		return "", false
-	}
-	if v := a.Value.Resolve(); v.Kind() == slog.KindString {
-		return v.String(), true
-	}
-	return "", false
-}
 
 // requestID returns the AWS request ID from the invocation context, if present.
 func requestID(ctx context.Context) (string, bool) {
@@ -712,12 +770,12 @@ func frameFor(pc uintptr) runtime.Frame {
 
 const hexDigits = "0123456789abcdef"
 
-// appendJSONString writes s as a JSON string literal, escaping control
+// appendJSONString appends s as a JSON string literal, escaping control
 // characters, quotes, and backslashes. '<', '>', and '&' are left unescaped,
 // and valid UTF-8 is copied verbatim. Invalid UTF-8 bytes are replaced with
 // U+FFFD, matching encoding/json, so the output is always valid JSON.
-func appendJSONString(b *buffer, s string) {
-	*b = append(*b, '"')
+func appendJSONString(b []byte, s string) []byte {
+	b = append(b, '"')
 	start := 0
 	for i := 0; i < len(s); {
 		c := s[i]
@@ -726,20 +784,20 @@ func appendJSONString(b *buffer, s string) {
 				i++
 				continue
 			}
-			*b = append(*b, s[start:i]...)
+			b = append(b, s[start:i]...)
 			switch c {
 			case '"':
-				*b = append(*b, '\\', '"')
+				b = append(b, '\\', '"')
 			case '\\':
-				*b = append(*b, '\\', '\\')
+				b = append(b, '\\', '\\')
 			case '\n':
-				*b = append(*b, '\\', 'n')
+				b = append(b, '\\', 'n')
 			case '\r':
-				*b = append(*b, '\\', 'r')
+				b = append(b, '\\', 'r')
 			case '\t':
-				*b = append(*b, '\\', 't')
+				b = append(b, '\\', 't')
 			default:
-				*b = append(*b, '\\', 'u', '0', '0', hexDigits[c>>4], hexDigits[c&0xF])
+				b = append(b, '\\', 'u', '0', '0', hexDigits[c>>4], hexDigits[c&0xF])
 			}
 			i++
 			start = i
@@ -747,40 +805,38 @@ func appendJSONString(b *buffer, s string) {
 		}
 		r, size := utf8.DecodeRuneInString(s[i:])
 		if r == utf8.RuneError && size == 1 {
-			*b = append(*b, s[start:i]...)
-			*b = append(*b, `�`...)
+			b = append(b, s[start:i]...)
+			b = append(b, `�`...)
 			i++
 			start = i
 			continue
 		}
 		i += size
 	}
-	*b = append(*b, s[start:]...)
-	*b = append(*b, '"')
+	b = append(b, s[start:]...)
+	return append(b, '"')
 }
 
-// buffer is a reusable byte slice for assembling a single log record.
-type buffer []byte
-
-func (b *buffer) writeString(s string) { *b = append(*b, s...) }
-func (b *buffer) writeByte(c byte)     { *b = append(*b, c) }
-
-var bufferPool = sync.Pool{
-	New: func() any {
-		b := make(buffer, 0, 1024)
-		return &b
-	},
-}
-
-func newBuffer() *buffer {
-	return bufferPool.Get().(*buffer)
-}
-
-func freeBuffer(b *buffer) {
-	const maxBufferSize = 16 << 10
-
-	if cap(*b) <= maxBufferSize {
-		*b = (*b)[:0]
-		bufferPool.Put(b)
+// textNeedsQuoting reports whether a text key or unquoted value must be quoted
+// to keep the line parseable, using the same rules as [slog.TextHandler].
+func textNeedsQuoting(s string) bool {
+	if len(s) == 0 {
+		return true
 	}
+	for i := 0; i < len(s); {
+		b := s[i]
+		if b < utf8.RuneSelf {
+			if b == ' ' || b == '=' || b == '"' || b < 0x20 || b == 0x7f {
+				return true
+			}
+			i++
+			continue
+		}
+		r, size := utf8.DecodeRuneInString(s[i:])
+		if r == utf8.RuneError || unicode.IsSpace(r) || !unicode.IsPrint(r) {
+			return true
+		}
+		i += size
+	}
+	return false
 }

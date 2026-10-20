@@ -68,16 +68,12 @@ func Test_appendJSONString(t *testing.T) {
 
 	for in, want := range cases {
 		t.Run(in, func(t *testing.T) {
-			b := make(buffer, 0, 16)
-			appendJSONString(&b, in)
-			assert.Equal(t, want, string(b))
+			assert.Equal(t, want, string(appendJSONString(nil, in)))
 		})
 	}
 
 	t.Run("control characters are u-escaped", func(t *testing.T) {
-		b := make(buffer, 0, 16)
-		appendJSONString(&b, "unit\x01sep")
-		assert.Equal(t, `"unit\u0001sep"`, string(b))
+		assert.Equal(t, `"unit\u0001sep"`, string(appendJSONString(nil, "unit\x01sep")))
 	})
 }
 
@@ -98,18 +94,25 @@ func Test_appendJSONValue(t *testing.T) {
 		{"error", slog.AnyValue(errors.New("boom")), `"boom"`},
 		{"nil", slog.AnyValue(nil), `null`},
 		{"json.Marshaler", slog.AnyValue(jsonMarshalerSuccess{}), `"JSON Marshal"`},
+		{"indented json.Marshaler is compacted", slog.AnyValue(jsonMarshalerIndented{}), `{"a":1}`},
 		{"struct", slog.AnyValue(struct {
 			A int `json:"a"`
 		}{A: 1}), `{"a":1}`},
+		{"nil error pointer", slog.AnyValue((*nilError)(nil)), `"<nil>"`},
+		{"panicking json.Marshaler", slog.AnyValue(jsonMarshalerPanic{}), `"!PANIC: boom"`},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			b := make(buffer, 0, 16)
-			appendJSONValue(&b, tc.value)
-			assert.Equal(t, tc.want, string(b))
+			assert.Equal(t, tc.want, appendValue(true, tc.value))
 		})
 	}
+
+	t.Run("json.Marshaler error is written as a string", func(t *testing.T) {
+		got := appendValue(true, slog.AnyValue(jsonMarshalerFailure{}))
+		assert.True(t, json.Valid([]byte(got)), got)
+		assert.Contains(t, got, "marshal failed")
+	})
 }
 
 func Test_appendTextValue(t *testing.T) {
@@ -129,13 +132,36 @@ func Test_appendTextValue(t *testing.T) {
 		{"json.Marshaler", slog.AnyValue(jsonMarshalerSuccess{}), `"\"JSON Marshal\""`},
 		{"json.Marshaler error", slog.AnyValue(jsonMarshalerFailure{}), `"marshal failed"`},
 		{"fmt fallback", slog.AnyValue(struct{ A int }{A: 1}), `{1}`},
+		{"fmt fallback needing quotes", slog.AnyValue([]string{"a b", "c"}), `"[a b c]"`},
+		{"nil error pointer", slog.AnyValue((*nilError)(nil)), `"<nil>"`},
+		{"panicking json.Marshaler", slog.AnyValue(jsonMarshalerPanic{}), `"!PANIC: boom"`},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			b := make(buffer, 0, 16)
-			appendTextValue(&b, tc.value)
-			assert.Equal(t, tc.want, string(b))
+			assert.Equal(t, tc.want, appendValue(false, tc.value))
+		})
+	}
+}
+
+func Test_textNeedsQuoting(t *testing.T) {
+	cases := map[string]bool{
+		"":           true,
+		"plain":      false,
+		"dotted.id":  false,
+		"héllo":      false,
+		"a b":        true,
+		"a=b":        true,
+		`a"b`:        true,
+		"tab\t":      true,
+		"del\x7f":    true,
+		"nbsp\u00a0": true,
+		"bad\xff":    true,
+	}
+
+	for in, want := range cases {
+		t.Run(in, func(t *testing.T) {
+			assert.Equal(t, want, textNeedsQuoting(in))
 		})
 	}
 }
@@ -149,9 +175,7 @@ func Test_appendJSONString_InvalidUTF8(t *testing.T) {
 	}
 
 	for in, want := range cases {
-		b := make(buffer, 0, 16)
-		appendJSONString(&b, in)
-		assert.Equal(t, want, string(b))
+		assert.Equal(t, want, string(appendJSONString(nil, in)))
 	}
 }
 
@@ -175,8 +199,7 @@ func FuzzAppendJSONString(f *testing.F) {
 	}
 
 	f.Fuzz(func(t *testing.T, s string) {
-		b := make(buffer, 0, 64)
-		appendJSONString(&b, s)
+		b := appendJSONString(nil, s)
 
 		var got string
 		if err := json.Unmarshal([]byte(b), &got); err != nil {
@@ -202,6 +225,30 @@ type jsonMarshalerSuccess struct{}
 
 func (jsonMarshalerSuccess) MarshalJSON() ([]byte, error) {
 	return []byte(`"JSON Marshal"`), nil
+}
+
+type jsonMarshalerIndented struct{}
+
+func (jsonMarshalerIndented) MarshalJSON() ([]byte, error) {
+	return []byte("{\n  \"a\": 1\n}"), nil
+}
+
+type jsonMarshalerPanic struct{}
+
+func (jsonMarshalerPanic) MarshalJSON() ([]byte, error) {
+	panic("boom")
+}
+
+// nilError dereferences its receiver, so a typed nil panics in Error.
+type nilError struct{ msg string }
+
+func (e *nilError) Error() string { return e.msg }
+
+// appendValue encodes v the way a record attribute's value is written.
+func appendValue(json bool, v slog.Value) string {
+	s := &handleState{h: &Handler{json: json}}
+	s.appendValue(v)
+	return string(s.buf)
 }
 
 type jsonMarshalerFailure struct{}
