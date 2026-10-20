@@ -1,6 +1,7 @@
 package voker
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -260,8 +261,68 @@ func TestSendError_TypedStackTraceIsNotFatal(t *testing.T) {
 		StackTrace: []StackFrame{{Path: "handler.go", Line: 42, Label: "handler"}},
 	}
 
-	require.NoError(t, sendError(context.Background(), inv, errResponse, logger))
+	require.NoError(t, sendError(context.Background(), inv, errResponse, &options{logger: logger}))
 }
+
+func TestSendError_RecordGroup(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusAccepted)
+	}))
+	defer server.Close()
+
+	send := func(t *testing.T, ctx context.Context, h slog.Handler) {
+		t.Helper()
+		logger := slog.New(h)
+		inv := &invocation{requestID: "req-123", client: newRuntimeClient(server.Listener.Addr().String(), logger)}
+		opts := &options{logger: logger, functionName: "my-func", functionVersion: "7"}
+		require.NoError(t, sendError(ctx, inv, errors.New("boom"), opts))
+	}
+
+	t.Run("is logged by handlers that don't add one", func(t *testing.T) {
+		var buf bytes.Buffer
+		send(t, context.Background(), slog.NewJSONHandler(&buf, nil))
+
+		var line struct {
+			Record map[string]string `json:"record"`
+		}
+		require.NoError(t, json.Unmarshal(buf.Bytes(), &line))
+		assert.Equal(t, map[string]string{"functionName": "my-func", "version": "7", "requestId": "req-123"}, line.Record)
+	})
+
+	t.Run("is left to handlers that add one", func(t *testing.T) {
+		var buf bytes.Buffer
+		h := &recordHandler{Handler: slog.NewJSONHandler(&buf, nil)}
+		send(t, context.Background(), h)
+
+		assert.NotContains(t, buf.String(), `"record"`)
+		lc, ok := FromContext(h.ctx)
+		require.True(t, ok, "the request ID must reach the handler through ctx")
+		assert.Equal(t, "req-123", lc.AwsRequestID)
+	})
+
+	t.Run("keeps an existing LambdaContext", func(t *testing.T) {
+		want := &LambdaContext{AwsRequestID: "req-123", TraceID: "trace"}
+		h := &recordHandler{Handler: slog.NewJSONHandler(io.Discard, nil)}
+		send(t, NewContext(context.Background(), want), h)
+
+		lc, _ := FromContext(h.ctx)
+		assert.Same(t, want, lc)
+	})
+}
+
+// recordHandler stands in for a handler like vokerslog.Handler that adds the
+// "record" group itself. It keeps the ctx of the last record it handled.
+type recordHandler struct {
+	slog.Handler
+	ctx context.Context
+}
+
+func (h *recordHandler) Handle(ctx context.Context, r slog.Record) error {
+	h.ctx = ctx
+	return h.Handler.Handle(ctx, r)
+}
+
+func (h *recordHandler) AddsLambdaRecord() bool { return true }
 
 func TestSendInitError(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

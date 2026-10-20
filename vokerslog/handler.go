@@ -24,6 +24,7 @@ import (
 	"os"
 	"reflect"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -223,6 +224,14 @@ func loggerIsJSON() bool {
 
 func (h *Handler) Enabled(_ context.Context, level slog.Level) bool {
 	return level >= h.level.Level()
+}
+
+// AddsLambdaRecord reports that h writes the Lambda "record" group
+// (functionName, version, requestId) itself, so voker leaves that group out of
+// its invocation error logs instead of writing the key twice. A handler that
+// wraps a Handler can forward this method to keep that behavior.
+func (h *Handler) AddsLambdaRecord() bool {
+	return true
 }
 
 // WithAttrs returns a Handler that writes attrs on every record. Like
@@ -493,8 +502,8 @@ func (s *handleState) appendAttrs(r *slog.Record) {
 		return true
 	})
 
-	for i := len(s.marks) - 1; i >= 0; i-- {
-		s.closeGroup(s.marks[i])
+	for _, v := range slices.Backward(s.marks) {
+		s.closeGroup(v)
 	}
 	if s.h.json {
 		for range p.nOpen {

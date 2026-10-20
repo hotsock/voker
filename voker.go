@@ -38,6 +38,8 @@ var (
 const (
 	lambdaEnvMaxConcurrency     = "AWS_LAMBDA_MAX_CONCURRENCY"
 	lambdaEnvInitializationType = "AWS_LAMBDA_INITIALIZATION_TYPE"
+	lambdaEnvFunctionName       = "AWS_LAMBDA_FUNCTION_NAME"
+	lambdaEnvFunctionVersion    = "AWS_LAMBDA_FUNCTION_VERSION"
 	managedInstancesInitType    = "lambda-managed-instances"
 )
 
@@ -47,6 +49,19 @@ type options struct {
 	extensions     []InternalExtension
 	logger         *slog.Logger
 	maxConcurrency int
+
+	// functionName and functionVersion are read once at startup for the
+	// "record" group of invocation error logs.
+	functionName    string
+	functionVersion string
+}
+
+// lambdaRecordHandler is implemented by slog handlers that add the Lambda
+// "record" group (functionName, version, requestId) to every record
+// themselves, such as vokerslog.Handler. sendError leaves its own record
+// group out for them so the key isn't written twice.
+type lambdaRecordHandler interface {
+	AddsLambdaRecord() bool
 }
 
 // Option is a function that modifies Options.
@@ -124,6 +139,8 @@ func start(handle func(context.Context, *runtimeClient, *options) error, opts ..
 		options.logger = defaultLogger()
 	}
 	options.maxConcurrency = MaxConcurrency()
+	options.functionName = os.Getenv(lambdaEnvFunctionName)
+	options.functionVersion = os.Getenv(lambdaEnvFunctionVersion)
 
 	runtimeAPI := os.Getenv("AWS_LAMBDA_RUNTIME_API")
 	if runtimeAPI == "" {
@@ -256,7 +273,7 @@ func handleInvocationContext[TIn, TOut any](workerCtx context.Context, client *r
 
 	deadline, err := parseDeadline(inv.headers.Get(headerDeadlineMS))
 	if err != nil {
-		return sendError(context.Background(), inv, newErrorResponse(err), options.logger)
+		return sendError(context.Background(), inv, newErrorResponse(err), options)
 	}
 
 	ctx, cancel := context.WithDeadline(context.Background(), deadline)
@@ -271,13 +288,13 @@ func handleInvocationContext[TIn, TOut any](workerCtx context.Context, client *r
 
 	if cognitoJSON := inv.headers.Get(headerCognitoIdentity); cognitoJSON != "" {
 		if err := json.Unmarshal([]byte(cognitoJSON), &lc.Identity); err != nil {
-			return sendError(ctx, inv, newErrorResponse(fmt.Errorf("failed to parse cognito identity: %w", err)), options.logger)
+			return sendError(ctx, inv, newErrorResponse(fmt.Errorf("failed to parse cognito identity: %w", err)), options)
 		}
 	}
 
 	if clientJSON := inv.headers.Get(headerClientContext); clientJSON != "" {
 		if err := json.Unmarshal([]byte(clientJSON), &lc.ClientContext); err != nil {
-			return sendError(ctx, inv, newErrorResponse(fmt.Errorf("failed to parse client context: %w", err)), options.logger)
+			return sendError(ctx, inv, newErrorResponse(fmt.Errorf("failed to parse client context: %w", err)), options)
 		}
 	}
 
@@ -285,7 +302,7 @@ func handleInvocationContext[TIn, TOut any](workerCtx context.Context, client *r
 
 	response, err := callHandler(ctx, inv.payload, handler)
 	if err != nil {
-		return sendError(ctx, inv, err, options.logger)
+		return sendError(ctx, inv, err, options)
 	}
 
 	if response.stream != nil {
@@ -371,7 +388,7 @@ func callHandler[TIn, TOut any](ctx context.Context, payload []byte, handler fun
 	return handlerResponse{payload: responseBytes}, nil
 }
 
-func sendError(ctx context.Context, inv *invocation, err error, logger *slog.Logger) error {
+func sendError(ctx context.Context, inv *invocation, err error, options *options) error {
 	errResp := newErrorResponse(err)
 
 	errorJSON, marshalErr := json.Marshal(errResp)
@@ -380,16 +397,21 @@ func sendError(ctx context.Context, inv *invocation, err error, logger *slog.Log
 		errorJSON = fmt.Appendf(nil, `{"errorMessage":"failed to marshal error: %s","errorType":"Runtime.MarshalError"}`, marshalErr.Error())
 	}
 
-	logger.ErrorContext(
-		ctx,
-		"invocation error",
-		"error", errResp,
-		slog.Group("record",
+	// Errors raised before the LambdaContext is attached still carry the
+	// request ID, for handlers that read it from ctx.
+	if _, ok := FromContext(ctx); !ok {
+		ctx = NewContext(ctx, &LambdaContext{AwsRequestID: inv.requestID})
+	}
+
+	attrs := []any{"error", errResp}
+	if h, ok := options.logger.Handler().(lambdaRecordHandler); !ok || !h.AddsLambdaRecord() {
+		attrs = append(attrs, slog.Group("record",
+			"functionName", options.functionName,
+			"version", options.functionVersion,
 			"requestId", inv.requestID,
-			"functionName", os.Getenv("AWS_LAMBDA_FUNCTION_NAME"),
-			"functionVersion", os.Getenv("AWS_LAMBDA_FUNCTION_VERSION"),
-		),
-	)
+		))
+	}
+	options.logger.ErrorContext(ctx, "invocation error", attrs...)
 
 	if err := inv.failure(errorJSON, errResp.Type); err != nil {
 		return fmt.Errorf("failed to send error response: %w", err)

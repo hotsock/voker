@@ -497,6 +497,16 @@ func TestHandler(t *testing.T) {
 		assert.Contains(t, buffer.String(), `"record":{"functionName":"my-func"}`)
 		assert.NotContains(t, buffer.String(), "version")
 	})
+
+	t.Run("tells voker it adds the record group", func(t *testing.T) {
+		type lambdaRecordHandler interface{ AddsLambdaRecord() bool }
+
+		logger := slog.New(vokerslog.NewHandler(io.Discard)).With("a", 1).WithGroup("g")
+
+		h, ok := logger.Handler().(lambdaRecordHandler)
+		require.True(t, ok)
+		assert.True(t, h.AddsLambdaRecord())
+	})
 }
 
 // nilError dereferences its receiver, so a typed nil panics in Error.
